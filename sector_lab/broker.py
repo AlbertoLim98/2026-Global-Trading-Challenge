@@ -21,6 +21,9 @@ class Broker(Protocol):
     def clock(self) -> dict: ...
     def latest_prices(self, symbols: list[str]) -> dict[str, float]: ...
     def submit_market(self, symbol: str, side: str, qty: float, client_id: str) -> dict: ...
+    def submit_limit(
+        self, symbol: str, side: str, qty: float, limit_price: float, client_id: str
+    ) -> dict: ...
     def get_order(self, order_id: str) -> dict: ...
 
 
@@ -97,17 +100,41 @@ class AlpacaBroker:
         return out
 
     def submit_market(self, symbol: str, side: str, qty: float, client_id: str) -> dict:
-        from alpaca.common.exceptions import APIError
         from alpaca.trading.enums import OrderSide, TimeInForce
         from alpaca.trading.requests import MarketOrderRequest
 
-        req = MarketOrderRequest(
-            symbol=symbol,
-            qty=qty,
-            side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
-            time_in_force=TimeInForce.DAY,
-            client_order_id=client_id,
+        return self._send(
+            MarketOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
+                time_in_force=TimeInForce.DAY,
+                client_order_id=client_id,
+            ),
+            client_id,
         )
+
+    def submit_limit(
+        self, symbol: str, side: str, qty: float, limit_price: float, client_id: str
+    ) -> dict:
+        from alpaca.trading.enums import OrderSide, TimeInForce
+        from alpaca.trading.requests import LimitOrderRequest
+
+        return self._send(
+            LimitOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
+                time_in_force=TimeInForce.DAY,
+                limit_price=round(limit_price, 2),
+                client_order_id=client_id,
+            ),
+            client_id,
+        )
+
+    def _send(self, req: Any, client_id: str) -> dict:
+        from alpaca.common.exceptions import APIError
+
         try:
             return _order(self._t.submit_order(req))
         except APIError as err:
@@ -193,6 +220,23 @@ class DemoBroker:
             }
             self.orders[client_id] = o
             return o
+
+    def submit_limit(
+        self, symbol: str, side: str, qty: float, limit_price: float, client_id: str
+    ) -> dict:
+        """Demo: l'ordine limite si esegue subito se il prezzo lo consente, altrimenti resta aperto."""
+        px = self.prices[symbol]
+        ok = limit_price >= px if side == "buy" else limit_price <= px
+        if not ok:
+            o = {
+                "order_id": uuid.uuid4().hex,
+                "order_status": "new",
+                "filled_qty": 0.0,
+                "filled_avg_price": None,
+            }
+            self.orders[client_id] = o
+            return o
+        return self.submit_market(symbol, side, qty, client_id)
 
     def get_order(self, order_id: str) -> dict:
         return next(o for o in self.orders.values() if o["order_id"] == order_id)
