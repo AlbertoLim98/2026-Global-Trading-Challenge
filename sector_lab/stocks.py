@@ -16,6 +16,7 @@ from metrics import MIN_BARS, TRADING_DAYS, rsi, trend_label
 # finestre (giorni di borsa) -> peso: le più recenti contano di più
 TWRR_WINDOWS: dict[int, int] = {21: 4, 63: 3, 126: 2, 252: 1}
 TOP_N = 10
+MAX_WEIGHT = 0.25  # tetto al peso di un singolo titolo nella strategia alto beta
 
 STOCK_PILLARS: dict[str, dict[str, int]] = {
     "trend": {"rp_vs_sma200": 1, "rp_sma50_vs_sma200": 1, "rp_vs_sma50": 1},
@@ -32,6 +33,13 @@ def _f(v: float) -> float | None:
 def twrr(rp: pd.Series, n: int) -> float | None:
     """Rendimento relativo sulla finestra n: (1+r_titolo)/(1+r_benchmark) - 1."""
     return None if len(rp) <= n else _f(rp.iloc[-1] / rp.iloc[-1 - n] - 1)
+
+
+def beta(sr: pd.Series, br: pd.Series, n: int) -> float | None:
+    """Beta = cov(rend. titolo, rend. ACWI) / var(rend. ACWI) sugli ultimi n giorni."""
+    x, y = sr.tail(n), br.tail(n)
+    var = y.var()
+    return None if not var else _f(x.cov(y) / var)
 
 
 def compute_relative(df: pd.DataFrame, bench: pd.DataFrame) -> dict | None:
@@ -74,13 +82,37 @@ def compute_relative(df: pd.DataFrame, bench: pd.DataFrame) -> dict | None:
     out["te_60d"] = _f(rrets.tail(60).std() * math.sqrt(TRADING_DAYS))
     out["rel_drawdown"] = _f(rp.iloc[-1] / rp.tail(TRADING_DAYS).max() - 1)
     out["vol_60d"] = _f(c.pct_change().tail(60).std() * math.sqrt(TRADING_DAYS))
+
+    sr, br = c.pct_change(), bc.pct_change()
+    out["beta_1y"] = beta(sr, br, TRADING_DAYS)
+    out["beta_6m"] = beta(sr, br, 126)
+    out["corr_1y"] = _f(sr.tail(TRADING_DAYS).corr(br.tail(TRADING_DAYS)))
     return out
 
 
-def rank_sector(
-    universe: pd.DataFrame, bars: dict[str, pd.DataFrame], bench: pd.DataFrame, top_n: int = TOP_N
-) -> dict:
-    """Migliori `top_n` titoli del settore (universe: colonne ticker, name, weight_pct)."""
+def cap_weights(raw: list[float], cap: float = MAX_WEIGHT) -> list[float]:
+    """Pesi proporzionali a `raw`, con tetto per titolo (l'eccesso va agli altri)."""
+    n = len(raw)
+    if n == 0:
+        return []
+    cap = max(cap, 1 / n)  # con pochi titoli il tetto non può essere inferiore a 1/n
+    w, fixed = [0.0] * n, set()
+    while True:
+        free = [i for i in range(n) if i not in fixed]
+        room = 1 - cap * len(fixed)
+        tot = sum(raw[i] for i in free)
+        for i in free:
+            w[i] = room * raw[i] / tot if tot else room / len(free)
+        over = [i for i in free if w[i] > cap + 1e-12]
+        if not over:
+            return w
+        for i in over:
+            w[i] = cap
+            fixed.add(i)
+
+
+def analyze_sector(universe: pd.DataFrame, bars: dict[str, pd.DataFrame], bench: pd.DataFrame):
+    """Metriche e punteggi di tutti i titoli analizzabili del settore."""
     from metrics import score
 
     rows: dict[str, dict] = {}
@@ -92,13 +124,65 @@ def rank_sector(
                 "weight_pct": float(t.weight_pct),
                 **m,
             }
-    scores = (
-        score(rows, STOCK_PILLARS)
-        if len(rows) > 1
-        else {k: dict.fromkeys([*STOCK_PILLARS, "total"]) for k in rows}
-    )
+    if len(rows) > 1:
+        scores = score(rows, STOCK_PILLARS)
+    else:
+        scores = {k: dict.fromkeys([*STOCK_PILLARS, "total"]) for k in rows}
+    for k, row in rows.items():
+        row["scores"] = scores[k]
+    return rows
+
+
+def top_quality(rows: dict[str, dict], n_universe: int, top_n: int = TOP_N) -> dict:
+    """Migliori `top_n` per punteggio totale (media dei quattro pilastri)."""
     ranked = sorted(
-        rows, key=lambda k: -(scores[k]["total"] if scores[k]["total"] is not None else -1)
+        rows.values(),
+        key=lambda r: -(r["scores"]["total"] if r["scores"]["total"] is not None else -1),
     )
-    top = [{**rows[k], "scores": scores[k], "rank": i} for i, k in enumerate(ranked[:top_n], 1)]
-    return {"top": top, "n_analyzed": len(rows), "n_skipped": len(universe) - len(rows)}
+    top = [{**r, "rank": i} for i, r in enumerate(ranked[:top_n], 1)]
+    return {
+        "top": top,
+        "n_analyzed": len(rows),
+        "n_skipped": n_universe - len(rows),
+        "mode": "quality",
+    }
+
+
+def is_eligible(r: dict) -> bool:
+    """Filtro della strategia: relativo non ribassista e TWRR ponderato positivo."""
+    return r["trend_label"] != "Ribassista" and (r["twrr_w"] or 0) > 0 and r["beta_1y"] is not None
+
+
+def top_beta(rows: dict[str, dict], n_universe: int, top_n: int = TOP_N) -> dict:
+    """Strategia alto beta: tra i titoli idonei, i `top_n` con beta più alto.
+
+    Pesi proporzionali al beta (tetto MAX_WEIGHT per titolo); beta di portafoglio = somma pesata.
+    """
+    eligible = [r for r in rows.values() if is_eligible(r)]
+    chosen = sorted(eligible, key=lambda r: -r["beta_1y"])[:top_n]
+    # beta negativi o nulli non meritano peso: base minima piccola ma positiva
+    w = cap_weights([max(r["beta_1y"], 0.01) for r in chosen])
+    top = [
+        {**r, "rank": i, "strategy_weight": wi}
+        for i, (r, wi) in enumerate(zip(chosen, w, strict=True), 1)
+    ]
+    pbeta = sum(r["beta_1y"] * r["strategy_weight"] for r in top) if top else None
+    return {
+        "top": top,
+        "n_analyzed": len(rows),
+        "n_skipped": n_universe - len(rows),
+        "n_eligible": len(eligible),
+        "portfolio_beta": pbeta,
+        "mode": "beta",
+    }
+
+
+def rank_sector(
+    universe: pd.DataFrame,
+    bars: dict[str, pd.DataFrame],
+    bench: pd.DataFrame,
+    mode: str = "quality",
+) -> dict:
+    """Top 10 del settore (universe: colonne ticker, name, weight_pct) nella modalità scelta."""
+    rows = analyze_sector(universe, bars, bench)
+    return (top_beta if mode == "beta" else top_quality)(rows, len(universe))

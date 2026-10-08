@@ -163,8 +163,17 @@ STOCK_COLUMNS: list[Col] = [
     ("Volatilità (rel. ACWI)", "Da max relativo 52w", lambda r: r["rel_drawdown"], PCT),
     ("Volatilità (rel. ACWI)", "Vol titolo 60g", lambda r: r["vol_60d"], PCT),
     ("Volatilità (rel. ACWI)", "Score", lambda r: r["scores"]["volatility"], "score"),
+    ("Beta (vs ACWI)", "Beta 1 anno", lambda r: r["beta_1y"], NUM),
+    ("Beta (vs ACWI)", "Beta 6 mesi", lambda r: r["beta_6m"], NUM),
+    ("Beta (vs ACWI)", "Correlazione 1a", lambda r: r["corr_1y"], NUM),
     ("", "Score totale", lambda r: r["scores"]["total"], "score"),
 ]
+BETA_WEIGHT_COL: Col = (
+    "Strategia alto beta",
+    "Peso nel settore",
+    lambda r: r["strategy_weight"],
+    PCT,
+)
 
 STOCK_NOTES = [
     "Universo: titoli USA del fondo iShares MSCI ACWI, classificati per settore (11 settori GICS).",
@@ -174,16 +183,32 @@ STOCK_NOTES = [
     "Trend: prezzo relativo vs sue medie a 50 e 200 giorni. Rialzista = relativo > SMA50 > SMA200.",
     "Volume: volume 20g/90g del titolo diviso lo stesso rapporto di ACWI; Su/Giù = volume nei giorni in cui il relativo sale / scende.",
     "Volatilità: tracking error a 60g (dev. standard annualizzata dei rendimenti relativi), distanza dal massimo relativo a 52 settimane, volatilità del titolo. Più bassa = punteggio più alto.",
+    "Beta = cov(rend. titolo, rend. ACWI) / var(rend. ACWI) sui rendimenti giornalieri (1 anno e 6 mesi).",
     "Punteggi 0-100 = percentile dentro il settore. Classifica relativa, non un segnale operativo.",
     "Feed IEX (gratuito): i volumi sono solo quelli della borsa IEX; i rapporti sono confrontabili, i valori assoluti no.",
 ]
 
+BETA_NOTES = [
+    "STRATEGIA ALTO BETA (sistematica, solo acquisto): per ogni settore",
+    "  1. Filtro: trend relativo non Ribassista e TWRR ponderato > 0 (il titolo sta battendo ACWI).",
+    "  2. Priorità: tra gli idonei, i 10 con beta a 1 anno più alto.",
+    "  3. Pesi nel settore proporzionali al beta, con tetto del 25% per titolo.",
+    "  Se gli idonei sono meno di 10 la lista è più corta: nessun titolo non idoneo viene aggiunto.",
+    "  Un beta alto amplifica sia i guadagni sia le perdite rispetto al mercato: è una scelta di rischio, non di qualità.",
+]
 
-def build_stocks(results: dict[str, dict], sector_names: dict[str, str], meta: dict) -> bytes:
+
+def build_stocks(
+    results: dict[str, dict], sector_names: dict[str, str], meta: dict, mode: str = "quality"
+) -> bytes:
     """results: ETF -> {"top": [...], ...}. Un foglio per settore + foglio riepilogo se più settori."""
     wb = Workbook()
     wb.remove(wb.active)
-    cols = STOCK_COLUMNS
+    cols = (
+        [*STOCK_COLUMNS[:-1], BETA_WEIGHT_COL, STOCK_COLUMNS[-1]]
+        if mode == "beta"
+        else STOCK_COLUMNS
+    )
     if len(results) > 1:
         ws = wb.create_sheet("Tutti")
         all_rows = []
@@ -199,5 +224,10 @@ def build_stocks(results: dict[str, dict], sector_names: dict[str, str], meta: d
         lines.append(
             f"{etf} {sector_names[etf]}: analizzati {res['n_analyzed']}, esclusi {res['n_skipped']} (storico < 1 anno o dati mancanti)"
         )
-    _notes_sheet(wb, "Sector Lab - migliori aziende per settore", [*lines, "", *STOCK_NOTES])
+    title = (
+        "Sector Lab - strategia alto beta per settore"
+        if mode == "beta"
+        else "Sector Lab - migliori aziende per settore"
+    )
+    _notes_sheet(wb, title, [*lines, "", *(BETA_NOTES if mode == "beta" else []), *STOCK_NOTES])
     return _save(wb)

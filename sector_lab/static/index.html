@@ -61,6 +61,7 @@ svg{width:100%;height:auto;display:block}
   <section id="v-a" hidden>
     <div class="card" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
       <label>Settore <select id="a-sec"></select></label>
+      <label>Modalità <select id="a-mode"><option value="quality">Qualità (punteggio totale)</option><option value="beta">Strategia alto beta</option></select></label>
       <button class="btn" id="a-refresh">Ricalcola</button>
       <a class="btn" id="a-x1" href="#" download style="text-decoration:none">Scarica Excel (settore)</a>
       <a class="btn" id="a-xall" href="/api/export_stocks.xlsx?sector=all" download style="text-decoration:none">Scarica Excel (tutti i settori)</a>
@@ -70,7 +71,8 @@ svg{width:100%;height:auto;display:block}
       <p class="note">Le migliori 10 aziende del settore tra i titoli USA del fondo iShares ACWI, valutate sul <b>prezzo relativo ad ACWI</b> (prezzo titolo / prezzo ACWI).
       Momentum = rendimento relativo ponderato nel tempo (TWRR): (1+rend. titolo)/(1+rend. ACWI)-1 su 1/3/6/12 mesi con pesi 4/3/2/1.
       Trend: prezzo relativo vs sue medie 50/200g. Volume: rapporto 20g/90g del titolo diviso quello di ACWI. Volatilità: tracking error 60g, distanza dal massimo relativo a 52 settimane e volatilità del titolo (più bassa = punteggio più alto).
-      Punteggi 0-100 = percentile dentro il settore. Non è un segnale operativo.</p></div>
+      Punteggi 0-100 = percentile dentro il settore. Non è un segnale operativo.</p>
+      <p class="note" id="a-beta-note" hidden><b>Strategia alto beta:</b> si considerano solo i titoli con trend relativo non ribassista e TWRR ponderato positivo (che stanno battendo ACWI); tra questi si scelgono i 10 con beta a 1 anno più alto e si pesano in proporzione al beta (tetto 25% per titolo). Un beta alto amplifica guadagni e perdite rispetto al mercato.</p></div>
   </section>
   <section id="v-p" hidden><div id="acct"></div></section>
 </main>
@@ -196,20 +198,28 @@ const SCOLS=[
  ['Track. err. 60g',r=>pct(r.te_60d)],
  ['Da max rel.',r=>`<span class="down">${pct(r.rel_drawdown)}</span>`],
  ['Score',r=>pill(r.scores.volatility)],
+ ['Beta 1a',r=>`<b>${num(r.beta_1y)}</b>`],
+ ['Beta 6m',r=>num(r.beta_6m)],
  ['Totale',r=>pill(r.scores.total)]];
-const SGROUPS=[['',3],['Trend (vs ACWI)',3],['Momentum (TWRR vs ACWI)',6],['Volume',3],['Volatilità',3],['',1]];
+const WCOL=['Peso',r=>pct(r.strategy_weight)];
+const SGROUPS=[['',3],['Trend (vs ACWI)',3],['Momentum (TWRR vs ACWI)',6],['Volume',3],['Volatilità',3],['Beta',2],['',1]];
 let aInit=false;
 async function loadStocks(refresh){
-  const sec=$('#a-sec').value;
-  $('#a-x1').href='/api/export_stocks.xlsx?sector='+sec;
+  const sec=$('#a-sec').value,mode=$('#a-mode').value;
+  $('#a-x1').href='/api/export_stocks.xlsx?sector='+sec+'&mode='+mode;
+  $('#a-xall').href='/api/export_stocks.xlsx?sector=all&mode='+mode;
+  $('#a-beta-note').hidden=mode!=='beta';
   $('#a-meta').textContent='calcolo in corso… (scarico lo storico di tutte le aziende del settore)';
   $('#a-tbl').innerHTML='';
   try{
-    const d=await api('/api/stocks?sector='+sec+(refresh?'&refresh=1':''));
-    $('#a-meta').textContent=`${d.sector_name}: ${d.n_analyzed} aziende analizzate, ${d.n_skipped} escluse (storico < 1 anno) · benchmark ${d.benchmark} · feed ${d.feed}`;
-    $('#a-tbl').innerHTML='<thead><tr>'+SGROUPS.map(g=>`<th class="g" colspan="${g[1]}">${g[0]}</th>`).join('')+'</tr><tr>'
-      +SCOLS.map(c=>`<th style="cursor:default">${c[0]}</th>`).join('')+'</tr></thead><tbody>'
-      +d.top.map(r=>'<tr style="cursor:default">'+SCOLS.map(c=>`<td>${c[1](r)}</td>`).join('')+'</tr>').join('')+'</tbody>';
+    const d=await api('/api/stocks?sector='+sec+'&mode='+mode+(refresh?'&refresh=1':''));
+    $('#a-meta').textContent=`${d.sector_name}: ${d.n_analyzed} aziende analizzate, ${d.n_skipped} escluse (storico < 1 anno) · benchmark ${d.benchmark} · feed ${d.feed}`
+      +(mode==='beta'?` · idonei ${d.n_eligible} · beta del portafoglio ${num(d.portfolio_beta)}`:'');
+    const cols=mode==='beta'?[...SCOLS.slice(0,-1),WCOL,SCOLS.at(-1)]:SCOLS;
+    const groups=mode==='beta'?[...SGROUPS.slice(0,-1),['Strategia',1],['',1]]:SGROUPS;
+    $('#a-tbl').innerHTML='<thead><tr>'+groups.map(g=>`<th class="g" colspan="${g[1]}">${g[0]}</th>`).join('')+'</tr><tr>'
+      +cols.map(c=>`<th style="cursor:default">${c[0]}</th>`).join('')+'</tr></thead><tbody>'
+      +(d.top.length?d.top.map(r=>'<tr style="cursor:default">'+cols.map(c=>`<td>${c[1](r)}</td>`).join('')+'</tr>').join(''):`<tr><td colspan="${cols.length}" style="text-align:center;color:var(--mute)">Nessun titolo idoneo in questo settore</td></tr>`)+'</tbody>';
   }catch(e){$('#a-meta').textContent='';err(e)}
 }
 function showTab(t){
@@ -218,7 +228,7 @@ function showTab(t){
   if(t==='a'){
     if(!aInit&&DATA){aInit=true;
       $('#a-sec').innerHTML=DATA.sectors.slice().sort((a,b)=>a.name.localeCompare(b.name)).map(s=>`<option value="${s.symbol}">${s.name} (${s.symbol})</option>`).join('');
-      $('#a-sec').onchange=()=>loadStocks(false);$('#a-refresh').onclick=()=>loadStocks(true);
+      $('#a-sec').onchange=()=>loadStocks(false);$('#a-mode').onchange=()=>loadStocks(false);$('#a-refresh').onclick=()=>loadStocks(true);
       const best=DATA.sectors.reduce((a,b)=>(b.scores.total||0)>(a.scores.total||0)?b:a);$('#a-sec').value=best.symbol;
       loadStocks(false)}
   }

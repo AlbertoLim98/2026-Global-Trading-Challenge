@@ -34,6 +34,18 @@ Il punteggio è il percentile dentro il settore (media dei quattro pilastri). I 
 un anno di storico sono esclusi. Dalla scheda si scarica l'Excel del settore o di tutti i settori.
 Per aggiornare l'elenco delle aziende: `uv run python sector_lab/build_universe.py file_ishares.xls`.
 
+### Strategia alto beta
+
+Nella scheda "Aziende" la modalità **Strategia alto beta** dà priorità ai beta più alti
+(beta = cov(rend. titolo, rend. ACWI) / var(rend. ACWI), 1 anno di rendimenti giornalieri):
+
+1. filtro: trend relativo non ribassista e TWRR ponderato > 0 (il titolo batte ACWI);
+2. priorità: tra gli idonei, i 10 con beta più alto;
+3. pesi nel settore proporzionali al beta, tetto 25% per titolo; si mostra il beta del portafoglio.
+
+Se gli idonei sono meno di 10 la lista è più corta. Un beta alto amplifica guadagni e perdite
+rispetto al mercato. Anche questa lista si scarica in Excel (colonne Beta e Peso).
+
 ## Avvio
 
 ```bash

@@ -158,3 +158,57 @@ def test_stock_export_has_sheet_per_sector():
 def test_universe_csv_covers_all_sectors():
     uni = data.load_universe()
     assert set(uni.sector_etf) == set(data.SECTORS) and uni.ticker.is_unique
+
+
+def test_beta_of_scaled_benchmark_returns():
+    import stocks
+
+    rng = np.random.default_rng(7)
+    br = rng.normal(0.0003, 0.01, 300)
+    b = frame(100 * np.cumprod(1 + br))
+    s = frame(100 * np.cumprod(1 + 1.8 * br))
+    m = stocks.compute_relative(s, b)
+    assert m["beta_1y"] == pytest.approx(1.8, abs=0.02) and m["corr_1y"] == pytest.approx(
+        1, abs=1e-6
+    )
+
+
+def test_cap_weights_sum_to_one_and_respect_cap():
+    import stocks
+
+    w = stocks.cap_weights([5, 1, 1, 1, 1, 1, 1, 1, 1, 1])
+    assert sum(w) == pytest.approx(1) and max(w) <= 0.25 + 1e-9 and w[0] == pytest.approx(0.25)
+    assert sum(stocks.cap_weights([1, 1])) == pytest.approx(1)  # tetto non scende sotto 1/n
+
+
+def test_beta_mode_filters_and_sorts_by_beta():
+    import stocks
+
+    uni, bars = _stock_universe(30)
+    rows = stocks.analyze_sector(uni, bars, bars["ACWI"])
+    r = stocks.top_beta(rows, len(uni))
+    betas = [t["beta_1y"] for t in r["top"]]
+    assert betas == sorted(betas, reverse=True) and len(r["top"]) <= 10
+    assert all(stocks.is_eligible(t) for t in r["top"])
+    assert sum(t["strategy_weight"] for t in r["top"]) == pytest.approx(1)
+    assert r["n_eligible"] == sum(stocks.is_eligible(x) for x in rows.values())
+    assert r["portfolio_beta"] == pytest.approx(
+        sum(t["beta_1y"] * t["strategy_weight"] for t in r["top"])
+    )
+
+
+def test_beta_export_has_weight_column():
+    import io
+
+    import export
+    import stocks
+    from openpyxl import load_workbook
+
+    uni, bars = _stock_universe(30)
+    res = stocks.rank_sector(uni, bars, bars["ACWI"], mode="beta")
+    meta = {"demo": True, "feed": "demo", "updated": "x"}
+    ws = load_workbook(io.BytesIO(export.build_stocks({"XLK": res}, data.SECTORS, meta, "beta")))[
+        "XLK Tecnologia"
+    ]
+    heads = [c.value for c in ws[2]]
+    assert "Peso nel settore" in heads and "Beta 1 anno" in heads
