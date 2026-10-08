@@ -9,6 +9,7 @@ solo in parte, errore del broker) viene segnalata e si può riposizionare a prez
 from __future__ import annotations
 
 import math
+import re
 import time
 import uuid
 from datetime import datetime
@@ -28,6 +29,9 @@ _RUNTIME = {
     "status", "snooze_until", "updated", "run_id", "error", "remaining_qty", "order_id",
     "exec_qty", "filled_qty", "filled_avg_price", "order_type", "shortfall",
 }  # fmt: skip
+
+
+_REPO_PREFIX = re.compile(r"^(Riposizionata a prezzo attuale \([^)]*\): )+")
 
 
 class DeskError(Exception):
@@ -77,6 +81,7 @@ class Desk:
         p = portfolio.Params(capital=capital, mode=mode)
         run_id = now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
 
+        tradable = self.state.tradable(refresh=True)
         sectors = self.state.sectors(refresh=True)
         by_etf = {
             etf: self.state.stock_ranking(etf, refresh=True, mode=mode) for etf in data.SECTORS
@@ -92,6 +97,14 @@ class Desk:
             tg["targets"], positions, prices, atrs, self.managed, acct["cash"], p
         )
         res["notes"] = [*tg["notes"], *res["notes"]]
+        if tradable is not None:
+            gone = sorted(set(self.managed) - tradable)
+            if gone:
+                shown = ", ".join(gone[:12]) + ("…" if len(gone) > 12 else "")
+                res["notes"].append(
+                    f"{len(gone)} titoli dell'elenco non sono negoziabili su Alpaca (non attivi, fusi o "
+                    f"ritirati) e sono stati esclusi: {shown}"
+                )
         if acct["equity"] < capital * 0.99:
             res["notes"].append(
                 f"Il conto ha {acct['equity']:,.0f}$ di patrimonio, meno del capitale previsto "
@@ -195,6 +208,12 @@ class Desk:
         pr = self.journal.get_proposal(pid)
         sym, side = pr["symbol"], pr["side"]
         try:
+            tradable = self.state.tradable()
+            if side == "buy" and tradable is not None and sym not in tradable:
+                return self._fail(
+                    pid,
+                    f"{sym} non è negoziabile su Alpaca (non attivo): sarà escluso dal prossimo ribilanciamento",
+                )
             price = self.broker.latest_prices([sym]).get(sym) or pr["price"]
             qty = pr["qty"]
             if side == "sell":
@@ -230,7 +249,10 @@ class Desk:
                 else self.broker.submit_market(sym, side, qty, cid)
             )
         except Exception as e:  # noqa: BLE001 - qualsiasi errore del broker: segnala e prosegui
-            return self._fail(pid, f"{type(e).__name__}: {e}")
+            msg = f"{type(e).__name__}: {e}"
+            if "not active" in msg or "not tradable" in msg:
+                msg += f" — {sym} non è negoziabile: sarà escluso dal prossimo ribilanciamento"
+            return self._fail(pid, msg)
         self.journal.update_data(
             pid, order_id=order["order_id"], exec_qty=qty, order_type=order_type,
             filled_qty=order["filled_qty"], filled_avg_price=order["filled_avg_price"],
@@ -320,7 +342,7 @@ class Desk:
             "price": price,
             "value": remaining * price,
             "parent_id": pid,
-            "reason": f"Riposizionata a prezzo attuale ({price:.2f}$, da {pid}): {pr['reason']}",
+            "reason": f"Riposizionata a prezzo attuale ({price:.2f}$, da {pid}): {_REPO_PREFIX.sub('', pr['reason'])}",
         }
         self.journal.add_proposal(pr["run_id"], new)
         self.journal.set_status(

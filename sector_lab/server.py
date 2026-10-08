@@ -41,11 +41,28 @@ class State:
         self._bars: dict = {}
         self._at = 0.0
         self._stocks: dict[str, tuple[float, dict]] = {}
+        self.tradable_fn = None  # broker.tradable_symbols (None in demo: nessun filtro)
+        self._tradable: tuple[float, set[str] | None] | None = None
         self._lock = threading.Lock()
 
     def fetch_bars(self, symbols: list[str]) -> dict:
         """Storico giornaliero di simboli arbitrari (dati demo o Alpaca)."""
         return data.demo_bars(symbols) if self.demo else data.fetch_bars(symbols, self.feed)
+
+    def tradable(self, refresh: bool = False) -> set[str] | None:
+        """Simboli negoziabili sul broker (cache 6 ore). None = nessun filtro (demo o errore)."""
+        if self.tradable_fn is None:
+            return None
+        with self._lock:
+            if self._tradable and not refresh and time.time() - self._tradable[0] < 6 * 3600:
+                return self._tradable[1]
+        try:
+            syms = self.tradable_fn()
+        except Exception:  # noqa: BLE001 - senza elenco non si filtra; il broker rifiuterà l'ordine
+            syms = None
+        with self._lock:
+            self._tradable = (time.time(), syms)
+        return syms
 
     def portfolio_weights(self, mode: str, capital: float = 1_000_000.0) -> dict:
         """Pesi reali dell'algoritmo di ribilanciamento: il titolo è valutato insieme agli altri settori."""
@@ -95,6 +112,11 @@ class State:
                 return hit[1][mode]
         uni = data.load_universe()
         uni = uni[uni.sector_etf == etf]
+        tradable = self.tradable()
+        if (
+            tradable is not None
+        ):  # fuori i titoli non attivi o non negoziabili (fusi, ritirati, sospesi)
+            uni = uni[uni.ticker.isin(tradable)]
         syms = [*uni.ticker, data.STOCK_BENCHMARK]
         bars = data.demo_bars(syms) if self.demo else data.fetch_bars(syms, self.feed)
         if data.STOCK_BENCHMARK not in bars:
@@ -310,6 +332,7 @@ def main() -> None:
         creds = data.keys()
         broker = broker_mod.AlpacaBroker(*creds, feed=feed)
         jpath = Path(os.environ.get("SECTOR_LAB_JOURNAL", HERE / "journal.db"))
+    state.tradable_fn = broker.tradable_symbols
     desk = desk_mod.Desk(state, broker, journal_mod.Journal(jpath))
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(state, desk, a.port))
     url = f"http://127.0.0.1:{a.port}"

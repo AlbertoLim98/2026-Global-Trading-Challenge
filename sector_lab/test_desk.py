@@ -510,3 +510,35 @@ def test_stock_view_weights_come_from_the_real_allocation_across_sectors(env):
     assert all(r["sector_score"] == secs[e] for e, v in views.items() for r in v["top"])
     bv = state.stock_view("XLK", "beta")
     assert all("weight_portfolio" in r and "weight_in_sector" in r for r in bv["top"])
+
+
+def test_untradable_titles_are_excluded_from_selection_and_reported(env):
+    desk, _, _ = env
+    uni = set(data.load_universe().ticker)
+    gone = {"AAPL", "NVDA", "MSFT", "AMZN", "GOOGL"} & uni
+    desk.state.tradable_fn = lambda: uni - gone
+    res = desk.run("quality", 1_000_000)
+    held = {t["symbol"] for t in desk.trades()}
+    assert not (held & gone)
+    assert any("non sono negoziabili su Alpaca" in n for n in res["notes"])
+    views = [desk.state.stock_view(e, "quality") for e in data.SECTORS]
+    assert not ({r["symbol"] for v in views for r in v["top"]} & gone)
+    assert sum(r["weight_portfolio"] for v in views for r in v["top"]) == pytest.approx(0.97)
+
+
+def test_inactive_asset_error_is_explained_and_reposition_prefix_is_not_repeated(env, monkeypatch):
+    desk, broker, _ = env
+
+    def inactive(*a, **k):
+        raise RuntimeError('{"code":40010001,"message":"asset WBD is not active"}')
+
+    monkeypatch.setattr(broker, "submit_market", inactive)
+    monkeypatch.setattr(broker, "submit_limit", inactive)
+    desk.run("quality", 1_000_000)
+    t = next(x for x in desk.trades() if x["status"] == "failed")
+    assert "non è negoziabile" in t["error"] and "prossimo ribilanciamento" in t["error"]
+    r1 = desk.reposition(t["id"])
+    r2 = desk.reposition(r1["new_id"])
+    reason = desk.journal.get_proposal(r2["new_id"])["reason"]
+    assert reason.count("Riposizionata a prezzo attuale") == 1
+    assert reason.endswith(t["reason"])

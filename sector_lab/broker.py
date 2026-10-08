@@ -19,6 +19,7 @@ class Broker(Protocol):
     def account(self) -> dict: ...
     def positions(self) -> list[dict]: ...
     def clock(self) -> dict: ...
+    def tradable_symbols(self) -> set[str] | None: ...
     def latest_prices(self, symbols: list[str]) -> dict[str, float]: ...
     def submit_market(self, symbol: str, side: str, qty: float, client_id: str) -> dict: ...
     def submit_limit(
@@ -87,6 +88,16 @@ class AlpacaBroker:
             "next_open": str(c.next_open),
             "next_close": str(c.next_close),
         }
+
+    def tradable_symbols(self) -> set[str] | None:
+        """Azioni USA attive e negoziabili su Alpaca (esclude titoli sospesi, fusi o ritirati)."""
+        from alpaca.trading.enums import AssetClass, AssetStatus
+        from alpaca.trading.requests import GetAssetsRequest
+
+        assets = self._t.get_all_assets(
+            GetAssetsRequest(status=AssetStatus.ACTIVE, asset_class=AssetClass.US_EQUITY)
+        )
+        return {a.symbol for a in assets if a.tradable}
 
     def latest_prices(self, symbols: list[str]) -> dict[str, float]:
         from alpaca.data.enums import DataFeed
@@ -191,6 +202,9 @@ class DemoBroker:
 
     def clock(self) -> dict:
         return {"is_open": True, "next_open": "", "next_close": ""}
+
+    def tradable_symbols(self) -> set[str] | None:
+        return None  # demo: tutto è negoziabile
 
     def latest_prices(self, symbols: list[str]) -> dict[str, float]:
         return {s: self.prices[s] for s in symbols if s in self.prices}

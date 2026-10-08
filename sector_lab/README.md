@@ -92,6 +92,11 @@ La scheda **Portafoglio paper** mostra la composizione (titoli con peso, P/L di 
 ripartizione per settore), il guadagno/perdita di oggi e da apertura portafoglio (patrimonio al primo
 ribilanciamento registrato) e, in un elenco a parte, i movimenti eseguiti oggi (giorno di borsa di New York).
 
+**Titoli non negoziabili:** a ogni ribilanciamento il programma chiede ad Alpaca l'elenco delle azioni
+attive e negoziabili ed esclude dall'elenco quelle che non lo sono (fusi, ritirati, sospesi: es. un
+errore "asset WBD is not active"). Vale anche per la scheda Aziende. Dopo un errore di questo tipo
+rilancia il ribilanciamento: il titolo sarà escluso e il suo importo ridistribuito.
+
 Il **Journal** (SQLite `sector_lab/journal.db`, solo accodamento: modifiche e cancellazioni sono
 bloccate) registra ogni esecuzione con le tabelle usate e i target, ogni proposta, decisione,
 ordine, esito ed errore; è consultabile nella scheda e scaricabile in Excel.
