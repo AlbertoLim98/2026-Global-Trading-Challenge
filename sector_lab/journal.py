@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 SCHEMA = """
@@ -151,21 +151,6 @@ class Journal:
         for p in old:
             self.set_status(p["id"], "superseded", "SUPERSEDED", {"by_run": run_id})
         return len(old)
-
-    def recent_stop_symbols(self, days: int) -> set[str]:
-        """Titoli venduti per stop negli ultimi `days` giorni (non si ricomprano subito)."""
-        since = iso(now() - timedelta(days=days))
-        with self._lock:
-            rows = self._db.execute(
-                "SELECT p.data FROM proposals p WHERE p.status IN ('submitted','filled') AND p.updated >= ?",
-                (since,),
-            ).fetchall()
-        out = set()
-        for r in rows:
-            d = json.loads(r["data"])
-            if d["kind"] == "STOP":
-                out.add(d["symbol"])
-        return out
 
     @staticmethod
     def _row(r: sqlite3.Row) -> dict:

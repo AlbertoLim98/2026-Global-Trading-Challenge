@@ -61,11 +61,13 @@ Regole dell'algoritmo (`portfolio.py`, parametri in `Params`):
    massimo 25% del capitale per settore;
 2. titoli: solo la top 10 del settore con trend relativo non ribassista e TWRR > 0; pesi in
    proporzione al punteggio (o al beta in modalità alto beta); massimo 5% del capitale per titolo;
-3. liquidità minima 5%; gli acquisti si riducono se manca liquidità;
+3. liquidità minima 3%; gli acquisti si riducono se manca liquidità;
 4. **stop**: perdita per azione > 1 ATR(14) -> vendita completa proposta con priorità massima
    (pulsante "Controlla stop ATR" per verificarlo durante la giornata senza rifare le tabelle);
-   il titolo non viene ricomprato per 5 giorni;
-5. si ribilancia un titolo solo se lo scarto dal target supera 2.000$ e il 20% del valore target;
+   nessun divieto di riacquisto: se il titolo è ancora in classifica può essere ricomprato;
+5. vendite solo complete (stop, o titolo che esce dalla top 10 o dai filtri), mai parziali: le
+   statistiche si rifanno ogni giorno. Un titolo già in portafoglio sotto target viene integrato
+   solo se lo scarto supera 2.000$ e il 20% del valore target;
 6. le posizioni fuori dall'universo della strategia non vengono toccate.
 
 Queste regole **riducono** il rischio di perdite, non lo eliminano: nessun algoritmo può garantire

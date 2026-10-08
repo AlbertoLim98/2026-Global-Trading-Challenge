@@ -70,12 +70,6 @@ def test_targets_skip_bearish_and_low_score_and_respect_caps():
     assert sum(x["value"] for x in t["targets"].values()) <= P.max_sector * P.capital + 1e-6
 
 
-def test_blocked_symbol_not_targeted():
-    secs = [_sector("XLK", "Rialzista", 90)]
-    top = {"XLK": {"top": [_stock("AAA", 80), _stock("BBB", 70)]}}
-    assert "AAA" not in portfolio.build_targets(secs, top, P, blocked={"AAA"})["targets"]
-
-
 def test_proposals_stop_exit_buy_and_unmanaged():
     managed = {s: {"name": s, "sector": "XLK"} for s in ("STP", "OUT", "NEW")}
     targets = {
@@ -109,6 +103,23 @@ def test_stop_needs_loss_above_one_atr():
     assert portfolio.stop_hit({"avg_entry": 100, "price": 98.5}, 2.0, 1.0) is None
     assert portfolio.stop_hit({"avg_entry": 100, "price": 97.9}, 2.0, 1.0) == pytest.approx(2.1)
     assert portfolio.stop_hit({"avg_entry": 100, "price": 50}, None, 1.0) is None
+
+
+def test_no_partial_sells_for_overweight_titles():
+    managed = {"BIG": {"name": "B", "sector": "XLK"}}
+    targets = {
+        "BIG": {
+            "symbol": "BIG",
+            "name": "B",
+            "sector": "XLK",
+            "value": 10_000.0,
+            "price": 100.0,
+            "score": 70,
+        }
+    }
+    pos = {"BIG": {"qty": 500, "avg_entry": 100.0, "price": 100.0}}  # 50k contro target 10k
+    assert portfolio.build_proposals(targets, pos, {}, {}, managed, 100_000.0, P)["proposals"] == []
+    assert P.cash_reserve == 0.03
 
 
 def test_buys_scaled_when_cash_short_and_small_drift_ignored():
@@ -202,7 +213,7 @@ def test_new_run_supersedes_open_proposals(env):
     assert any(e["kind"] == "SUPERSEDED" for e in desk.journal.events(5000))
 
 
-def test_stop_flow_sells_and_blocks_rebuy(env):
+def test_stop_flow_sells_position(env):
     desk, broker, prices = env
     sym = next(s for s in data.load_universe().ticker if s in prices)
     px = prices[sym]
@@ -214,9 +225,6 @@ def test_stop_flow_sells_and_blocks_rebuy(env):
     assert desk.stop_check()["n_new"] == 0  # nessun duplicato
     assert desk.decide(stop["id"], "execute")["status"] == "filled"
     assert sym not in {p["symbol"] for p in broker.positions()}
-    assert sym in desk.journal.recent_stop_symbols(5)
-    desk.run("quality", 1_000_000)
-    assert not any(p["symbol"] == sym for p in desk.open_proposals())  # cooldown dopo lo stop
 
 
 def test_execute_after_position_gone_is_voided(env):

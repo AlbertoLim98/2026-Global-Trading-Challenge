@@ -68,8 +68,7 @@ class Desk:
         positions = self._positions()
         held_managed = [s for s in positions if s in self.managed]
         atrs = self._atrs(held_managed)
-        blocked = self.journal.recent_stop_symbols(p.cooldown_days)
-        tg = portfolio.build_targets(sectors["sectors"], by_etf, p, blocked)
+        tg = portfolio.build_targets(sectors["sectors"], by_etf, p)
         need = sorted(set(tg["targets"]) | set(held_managed))
         prices = self.broker.latest_prices(need) if need else {}
         acct = self.broker.account()
@@ -80,10 +79,6 @@ class Desk:
             res["notes"].append(
                 f"Il conto ha {acct['equity']:,.0f}$ di patrimonio, meno del capitale previsto "
                 f"({capital:,.0f}$): gli acquisti sono limitati dalla liquidità disponibile"
-            )
-        if blocked:
-            res["notes"].append(
-                "Non ricomprati dopo uno stop recente: " + ", ".join(sorted(blocked))
             )
 
         superseded = self.journal.supersede_open(run_id)

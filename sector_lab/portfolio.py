@@ -12,8 +12,10 @@ Regole (tutte modificabili in `Params`):
      tetto `max_stock` del capitale per titolo.
   4. Riserva di liquidità minima `cash_reserve`.
   5. Stop: posizione con perdita per azione > `atr_stop_mult` x ATR(14) -> vendita proposta con priorità
-     massima; il titolo non viene ricomprato per `cooldown_days` giorni.
-  6. Tolleranza: si ribilancia un titolo solo se lo scarto dal target supera `min_trade` e
+     massima (nessun divieto di riacquisto: se il titolo è ancora in classifica può essere ricomprato).
+  6. Vendite: solo complete (stop, o titolo che esce dalla top 10 / dai filtri). Nessuna vendita parziale:
+     le statistiche si rifanno ogni giorno, quindi un titolo sopra target resta com'è.
+  7. Acquisti: si integra un titolo sotto target solo se lo scarto supera `min_trade` e
      `drift_tolerance` x valore target (evita operazioni inutili ogni giorno).
 Nessuna regola può garantire l'assenza di perdite: riducono il rischio, non lo azzerano.
 """
@@ -30,14 +32,13 @@ import stocks
 @dataclass(frozen=True)
 class Params:
     capital: float = 1_000_000.0
-    cash_reserve: float = 0.05
+    cash_reserve: float = 0.03
     max_sector: float = 0.25
     max_stock: float = 0.05
     min_sector_score: float = 50.0
     min_trade: float = 2_000.0
     drift_tolerance: float = 0.20
     atr_stop_mult: float = 1.0
-    cooldown_days: int = 5
     mode: str = "quality"  # "quality" | "beta"
 
     def as_dict(self) -> dict:
@@ -101,7 +102,6 @@ def build_targets(
     sector_rows: list[dict],
     stocks_by_etf: dict[str, dict],
     p: Params,
-    blocked: set[str] = frozenset(),
 ) -> dict:
     """Allocazione obiettivo: settori con budget e titoli con valore in dollari."""
     sectors = sector_budgets(sector_rows, p)
@@ -110,7 +110,7 @@ def build_targets(
         if not s["eligible"] or s["budget"] <= 0:
             continue
         top = (stocks_by_etf.get(s["symbol"]) or {}).get("top", [])
-        cand = [r for r in top if stocks.is_eligible(r) and r["symbol"] not in blocked]
+        cand = [r for r in top if stocks.is_eligible(r)]
         if p.mode == "beta":
             raw = {r["symbol"]: r.get("strategy_weight") or max(r["beta_1y"], 0.01) for r in cand}
         else:
@@ -234,25 +234,7 @@ def build_proposals(
                 )
             )
             continue
-        delta = tgt["value"] - cur
-        if abs(delta) < max(p.min_trade, p.drift_tolerance * tgt["value"]):
-            continue
-        qty = math.floor(abs(delta) / price)
-        if delta < 0 and qty >= 1:
-            props.append(
-                _proposal(
-                    "SELL",
-                    "sell",
-                    sym,
-                    info["name"],
-                    info["sector"],
-                    min(qty, pos["qty"]),
-                    price,
-                    f"Sopra il target ({cur:,.0f}$ contro {tgt['value']:,.0f}$): riduzione",
-                    current_value=cur,
-                    target_value=tgt["value"],
-                )
-            )
+        # sopra o vicino al target: nessuna vendita parziale (si riparte da zero ogni giorno)
 
     held = {s for s, pos in positions.items() if pos["qty"] > 0}
     buys: list[dict] = []
