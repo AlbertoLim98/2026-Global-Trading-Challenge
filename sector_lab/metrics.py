@@ -126,7 +126,9 @@ PILLARS: dict[str, dict[str, int]] = {
 }
 
 
-def score(rows: dict[str, dict]) -> dict[str, dict[str, float | None]]:
+def score(
+    rows: dict[str, dict], pillars: dict[str, dict[str, int]] | None = None
+) -> dict[str, dict[str, float | None]]:
     """Punteggi 0-100 per pilastro: rango percentile del settore sugli altri settori.
 
     Per la volatilità un valore basso dà un punteggio alto. Il punteggio totale è la
@@ -135,7 +137,7 @@ def score(rows: dict[str, dict]) -> dict[str, dict[str, float | None]]:
     df = pd.DataFrame(rows).T
     out: dict[str, dict[str, float | None]] = {k: {} for k in rows}
     pillar_scores = {}
-    for pillar, comps in PILLARS.items():
+    for pillar, comps in (pillars or PILLARS).items():
         ranks = []
         for col, sign in comps.items():
             s = pd.to_numeric(df[col], errors="coerce") * sign

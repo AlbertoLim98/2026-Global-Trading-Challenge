@@ -7,6 +7,7 @@ codice per inviare ordini.
 from __future__ import annotations
 
 import os
+import zlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -27,6 +28,8 @@ SECTORS: dict[str, str] = {
     "XLRE": "Immobiliare",
 }
 BENCHMARK = "SPY"
+STOCK_BENCHMARK = "ACWI"  # riferimento per il rendimento relativo delle aziende
+UNIVERSE_CSV = Path(__file__).with_name("universe_us.csv")
 LOOKBACK_DAYS = 600  # ~410 sedute: 12 mesi di rendimenti + SMA200 sull'intero grafico
 
 
@@ -58,23 +61,27 @@ def fetch_bars(symbols: list[str], feed: str = "iex") -> dict[str, pd.DataFrame]
     if creds is None:
         raise RuntimeError("ALPACA_API_KEY / ALPACA_SECRET_KEY mancanti (.env)")
     client = StockHistoricalDataClient(*creds)
-    req = StockBarsRequest(
-        symbol_or_symbols=symbols,
-        timeframe=TimeFrame.Day,
-        start=datetime.now(UTC) - timedelta(days=LOOKBACK_DAYS),
-        adjustment=Adjustment.ALL,
-        feed=DataFeed(feed.lower()),
-    )
-    raw = client.get_stock_bars(req).df
     out: dict[str, pd.DataFrame] = {}
-    for sym in symbols:
-        if sym not in raw.index.get_level_values(0):
-            continue
-        d = raw.loc[sym][["open", "high", "low", "close", "volume"]].copy()
-        d.index = (
-            pd.DatetimeIndex(d.index).tz_convert("America/New_York").normalize().tz_localize(None)
+    for i in range(0, len(symbols), 100):  # richieste da max 100 simboli
+        chunk = symbols[i : i + 100]
+        req = StockBarsRequest(
+            symbol_or_symbols=chunk,
+            timeframe=TimeFrame.Day,
+            start=datetime.now(UTC) - timedelta(days=LOOKBACK_DAYS),
+            adjustment=Adjustment.ALL,
+            feed=DataFeed(feed.lower()),
         )
-        out[sym] = d
+        raw = client.get_stock_bars(req).df
+        if raw.empty:
+            continue
+        present = set(raw.index.get_level_values(0))
+        for sym in chunk:
+            if sym not in present:
+                continue
+            d = raw.loc[sym][["open", "high", "low", "close", "volume"]].copy()
+            idx = pd.DatetimeIndex(d.index).tz_convert("America/New_York")
+            d.index = idx.normalize().tz_localize(None)
+            out[sym] = d
     return out
 
 
@@ -83,7 +90,7 @@ def demo_bars(symbols: list[str]) -> dict[str, pd.DataFrame]:
     idx = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=420)
     out = {}
     for sym in symbols:
-        rng = np.random.default_rng(sum(map(ord, sym)))
+        rng = np.random.default_rng(zlib.crc32(sym.encode()))
         drift = rng.uniform(-0.0002, 0.0007)
         sigma = rng.uniform(0.007, 0.016)
         close = 100 * np.exp(np.cumsum(rng.normal(drift, sigma, len(idx))))
@@ -130,3 +137,8 @@ def account_snapshot() -> dict:
         "status": str(getattr(acc.status, "value", acc.status)),
         "positions": positions,
     }
+
+
+def load_universe() -> pd.DataFrame:
+    """Titoli USA per settore (ticker, name, sector_etf, weight_pct)."""
+    return pd.read_csv(UNIVERSE_CSV)

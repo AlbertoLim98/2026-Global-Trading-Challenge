@@ -17,6 +17,23 @@ Ogni pilastro ha un punteggio 0-100 (percentile del settore sugli altri 10; per 
 un valore basso dà un punteggio alto) e c'è un totale. È una classifica relativa per orientarsi,
 non un segnale operativo. La scheda "Portafoglio paper" mostra conto e posizioni in sola lettura.
 
+## Migliori aziende per settore (scheda "Aziende")
+
+Per ogni settore mostra le **10 migliori aziende** tra i titoli USA del fondo iShares MSCI ACWI
+(`universe_us.csv`, 514 titoli con settore). Tutte le caratteristiche sono valutate sul
+**prezzo relativo ad ACWI** (prezzo titolo / prezzo ACWI):
+
+- **Momentum:** TWRR (time-weighted relative return) = (1 + rend. titolo) / (1 + rend. ACWI) - 1,
+  su 1/3/6/12 mesi; il TWRR ponderato li media con pesi 4/3/2/1 (contano di più i periodi recenti).
+- **Trend:** prezzo relativo vs sue medie a 50 e 200 giorni.
+- **Volume:** rapporto volume 20g/90g del titolo diviso lo stesso rapporto di ACWI, e volume nei
+  giorni in cui il relativo sale / scende.
+- **Volatilità:** tracking error a 60g, distanza dal massimo relativo a 52 settimane, volatilità del titolo.
+
+Il punteggio è il percentile dentro il settore (media dei quattro pilastri). I titoli con meno di
+un anno di storico sono esclusi. Dalla scheda si scarica l'Excel del settore o di tutti i settori.
+Per aggiornare l'elenco delle aziende: `uv run python sector_lab/build_universe.py file_ishares.xls`.
+
 ## Avvio
 
 ```bash

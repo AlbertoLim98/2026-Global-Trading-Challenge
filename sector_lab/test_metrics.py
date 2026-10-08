@@ -98,3 +98,63 @@ def test_xlsx_export_roundtrip():
     assert ws.max_row == 2 + len(data.SECTORS)
     totals = [ws.cell(r, ws.max_column).value for r in range(3, ws.max_row + 1)]
     assert totals == sorted(totals, reverse=True)
+
+
+def _stock_universe(n=12):
+    import pandas as pd
+
+    bars = data.demo_bars([f"T{i}" for i in range(n)] + ["ACWI"])
+    uni = pd.DataFrame({"ticker": [f"T{i}" for i in range(n)], "name": "x", "weight_pct": 0.1})
+    return uni, bars
+
+
+def test_twrr_is_ratio_of_linked_returns():
+    import stocks
+
+    s = frame(100 * 1.002 ** np.arange(300))
+    b = frame(100 * 1.001 ** np.arange(300))
+    m = stocks.compute_relative(s, b)
+    assert m["twrr_3m"] == pytest.approx(1.002**63 / 1.001**63 - 1)
+    exp = sum(w * (1.002**n / 1.001**n - 1) for n, w in stocks.TWRR_WINDOWS.items()) / 10
+    assert m["twrr_w"] == pytest.approx(exp)
+    assert m["trend_label"] == "Rialzista"
+
+
+def test_short_history_excluded_and_top10_sorted():
+    import stocks
+
+    uni, bars = _stock_universe(14)
+    bars["T0"] = bars["T0"].tail(100)  # IPO recente
+    r = stocks.rank_sector(uni, bars, bars["ACWI"])
+    assert len(r["top"]) == 10 and r["n_skipped"] == 1
+    assert "T0" not in [t["symbol"] for t in r["top"]]
+    tot = [t["scores"]["total"] for t in r["top"]]
+    assert tot == sorted(tot, reverse=True) and [t["rank"] for t in r["top"]] == list(range(1, 11))
+
+
+def test_stock_export_has_sheet_per_sector():
+    import io
+    import json
+
+    import export
+    import stocks
+    from openpyxl import load_workbook
+
+    uni, bars = _stock_universe(12)
+    res = stocks.rank_sector(uni, bars, bars["ACWI"])
+    json.dumps(res, allow_nan=False)
+    meta = {"demo": True, "feed": "demo", "updated": "x"}
+    wb = load_workbook(
+        io.BytesIO(export.build_stocks({"XLK": res, "XLE": res}, data.SECTORS, meta))
+    )
+    assert (
+        wb.sheetnames[0] == "Tutti"
+        and "XLK Tecnologia" in wb.sheetnames
+        and "Note" in wb.sheetnames
+    )
+    assert wb["XLK Tecnologia"].max_row == 12
+
+
+def test_universe_csv_covers_all_sectors():
+    uni = data.load_universe()
+    assert set(uni.sector_etf) == set(data.SECTORS) and uni.ticker.is_unique

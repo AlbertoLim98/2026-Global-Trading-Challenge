@@ -25,6 +25,7 @@ sys.path.insert(0, str(HERE))
 import data
 import export
 import metrics
+import stocks
 
 CACHE_TTL = 600  # secondi
 
@@ -34,6 +35,7 @@ class State:
         self.demo, self.feed = demo, feed
         self._bars: dict = {}
         self._at = 0.0
+        self._stocks: dict[str, tuple[float, dict]] = {}
         self._lock = threading.Lock()
 
     def bars(self, refresh: bool = False) -> dict:
@@ -43,6 +45,31 @@ class State:
                 self._bars = data.demo_bars(syms) if self.demo else data.fetch_bars(syms, self.feed)
                 self._at = time.time()
             return self._bars
+
+    def stock_ranking(self, etf: str, refresh: bool = False) -> dict:
+        """Top 10 aziende del settore `etf`, valutate rispetto ad ACWI (cache per settore)."""
+        with self._lock:
+            hit = self._stocks.get(etf)
+            if hit and not refresh and time.time() - hit[0] < CACHE_TTL:
+                return hit[1]
+        uni = data.load_universe()
+        uni = uni[uni.sector_etf == etf]
+        syms = [*uni.ticker, data.STOCK_BENCHMARK]
+        bars = data.demo_bars(syms) if self.demo else data.fetch_bars(syms, self.feed)
+        if data.STOCK_BENCHMARK not in bars:
+            raise RuntimeError(f"nessun dato per il benchmark {data.STOCK_BENCHMARK}")
+        res = stocks.rank_sector(uni, bars, bars[data.STOCK_BENCHMARK])
+        res |= {"sector": etf, "sector_name": data.SECTORS[etf], "benchmark": data.STOCK_BENCHMARK}
+        with self._lock:
+            self._stocks[etf] = (time.time(), res)
+        return res
+
+    def meta(self) -> dict:
+        return {
+            "demo": self.demo,
+            "feed": "demo" if self.demo else self.feed,
+            "updated": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
 
     def sectors(self, refresh: bool = False) -> dict:
         bars = self.bars(refresh)
@@ -70,6 +97,16 @@ def make_handler(state: State) -> type[BaseHTTPRequestHandler]:
             self.end_headers()
             self.wfile.write(body)
 
+        def _xlsx(self, body: bytes, name: str) -> None:
+            self.send_response(200)
+            self.send_header(
+                "Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_GET(self) -> None:
             url = urlparse(self.path)
             q = parse_qs(url.query)
@@ -85,16 +122,23 @@ def make_handler(state: State) -> type[BaseHTTPRequestHandler]:
                     self._json(state.sectors(refresh="refresh" in q))
                 elif url.path == "/api/export.xlsx":
                     body = export.build(state.sectors())
-                    name = f"settori_{time.strftime('%Y-%m-%d')}.xlsx"
-                    self.send_response(200)
-                    self.send_header(
-                        "Content-Type",
-                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    )
-                    self.send_header("Content-Disposition", f'attachment; filename="{name}"')
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
+                    self._xlsx(body, f"settori_{time.strftime('%Y-%m-%d')}.xlsx")
+                elif url.path == "/api/stocks":
+                    etf = (q.get("sector") or [""])[0].upper()
+                    if etf not in data.SECTORS:
+                        self._json({"error": f"settore sconosciuto: {etf}"}, 404)
+                    else:
+                        self._json({**state.stock_ranking(etf, "refresh" in q), **state.meta()})
+                elif url.path == "/api/export_stocks.xlsx":
+                    etf = (q.get("sector") or ["all"])[0].upper()
+                    etfs = list(data.SECTORS) if etf == "ALL" else [etf]
+                    if any(e not in data.SECTORS for e in etfs):
+                        self._json({"error": f"settore sconosciuto: {etf}"}, 404)
+                    else:
+                        res = {e: state.stock_ranking(e) for e in etfs}
+                        body = export.build_stocks(res, data.SECTORS, state.meta())
+                        tag = "tutti" if etf == "ALL" else etf
+                        self._xlsx(body, f"aziende_{tag}_{time.strftime('%Y-%m-%d')}.xlsx")
                 elif url.path == "/api/history":
                     sym = (q.get("symbol") or [""])[0].upper()
                     bars = state.bars()

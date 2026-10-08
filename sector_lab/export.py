@@ -61,23 +61,21 @@ def _fill(score: float) -> PatternFill:
     return PatternFill("solid", fgColor=f"{r:02X}{min(g, 215):02X}7A")
 
 
-def build(payload: dict) -> bytes:
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Settori"
+def _sheet(
+    ws, columns: list[Col], rows: list[dict], first_data_row: int = 3, freeze: str = "C3"
+) -> None:
+    """Scrive intestazioni di gruppo (riga 1), intestazioni (riga 2) e righe dati."""
     thin = Side(style="thin", color="BBBBBB")
-    rows = sorted(payload["sectors"], key=lambda r: r["scores"]["total"] or -1, reverse=True)
-
-    # riga 1: gruppi uniti; riga 2: intestazioni
+    n = len(columns)
     start = 1
-    for i, (grp, head, _, _) in enumerate(COLUMNS, 1):
+    for i, (grp, head, _, _) in enumerate(columns, 1):
         ws.cell(2, i, head)
-        if grp and (i == len(COLUMNS) or COLUMNS[i][0] != grp):
+        if grp and (i == n or columns[i][0] != grp):
             ws.merge_cells(start_row=1, start_column=start, end_row=1, end_column=i)
             ws.cell(1, start, grp)
-        if i < len(COLUMNS) and COLUMNS[i][0] != grp:
+        if i < n and columns[i][0] != grp:
             start = i + 1
-    for c in range(1, len(COLUMNS) + 1):
+    for c in range(1, n + 1):
         for r_ in (1, 2):
             cell = ws.cell(r_, c)
             cell.font = Font(bold=True)
@@ -86,8 +84,8 @@ def build(payload: dict) -> bytes:
                 cell.border = Border(bottom=thin)
                 cell.fill = PatternFill("solid", fgColor="E8ECF4")
 
-    for ri, row in enumerate(rows, 3):
-        for ci, (_, _, get, fmt) in enumerate(COLUMNS, 1):
+    for ri, row in enumerate(rows, first_data_row):
+        for ci, (_, head, get, fmt) in enumerate(columns, 1):
             v = get(row)
             cell = ws.cell(ri, ci, v)
             if fmt == "score":
@@ -98,28 +96,108 @@ def build(payload: dict) -> bytes:
                 cell.alignment = Alignment(horizontal="center")
             elif fmt:
                 cell.number_format = fmt
-            if row.get("trend_label") and COLUMNS[ci - 1][1] == "Stato":
+            if head == "Stato":
                 color = {"Rialzista": "12805C", "Ribassista": "C0392B"}.get(v, "444444")
                 cell.font = Font(bold=True, color=color)
                 cell.alignment = Alignment(horizontal="center")
             if fmt in (PCT, PCT2) and isinstance(v, (int, float)) and v < 0:
                 cell.font = Font(color="C0392B")
 
-    for i, (_, head, _, _) in enumerate(COLUMNS, 1):
-        width = 24 if head == "Settore" else max(10, min(22, len(head) + 3))
-        ws.column_dimensions[get_column_letter(i)].width = width
+    for i, (_, head, _, _) in enumerate(columns, 1):
+        wide = head in ("Settore", "Azienda")
+        ws.column_dimensions[get_column_letter(i)].width = (
+            28 if wide else max(10, min(22, len(head) + 3))
+        )
     ws.row_dimensions[2].height = 32
-    ws.freeze_panes = "C3"
+    ws.freeze_panes = freeze
 
+
+def _notes_sheet(wb: Workbook, title: str, lines: list[str]) -> None:
     info = wb.create_sheet("Note")
-    info["A1"] = "Sector Lab - ETF settoriali SPDR"
+    info["A1"] = title
     info["A1"].font = Font(bold=True, size=13)
-    info["A2"] = f"Aggiornato: {payload['updated']}"
-    info["A3"] = f"Feed dati: {payload['feed']}" + (" (DATI SINTETICI)" if payload["demo"] else "")
-    for i, line in enumerate(NOTES, 5):
+    for i, line in enumerate(lines, 3):
         info.cell(i, 1, line)
-    info.column_dimensions["A"].width = 120
+    info.column_dimensions["A"].width = 130
 
+
+def _save(wb: Workbook) -> bytes:
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def build(payload: dict) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Settori"
+    rows = sorted(payload["sectors"], key=lambda r: r["scores"]["total"] or -1, reverse=True)
+    _sheet(ws, COLUMNS, rows)
+    lines = [f"Aggiornato: {payload['updated']}"]
+    lines.append(f"Feed dati: {payload['feed']}" + (" (DATI SINTETICI)" if payload["demo"] else ""))
+    _notes_sheet(wb, "Sector Lab - ETF settoriali SPDR", [*lines, "", *NOTES])
+    return _save(wb)
+
+
+STOCK_COLUMNS: list[Col] = [
+    ("", "Pos.", lambda r: r["rank"], "0"),
+    ("", "Ticker", lambda r: r["symbol"], None),
+    ("", "Azienda", lambda r: r["name"], None),
+    ("", "Prezzo", lambda r: r["price"], NUM),
+    ("", "Peso in ACWI %", lambda r: r["weight_pct"], "0.000"),
+    ("Trend (rel. ACWI)", "Stato", lambda r: r["trend_label"], None),
+    ("Trend (rel. ACWI)", "vs SMA50", lambda r: r["rp_vs_sma50"], PCT),
+    ("Trend (rel. ACWI)", "vs SMA200", lambda r: r["rp_vs_sma200"], PCT),
+    ("Trend (rel. ACWI)", "SMA50 vs SMA200", lambda r: r["rp_sma50_vs_sma200"], PCT),
+    ("Trend (rel. ACWI)", "Score", lambda r: r["scores"]["trend"], "score"),
+    ("Momentum (TWRR vs ACWI)", "1m", lambda r: r["twrr_1m"], PCT),
+    ("Momentum (TWRR vs ACWI)", "3m", lambda r: r["twrr_3m"], PCT),
+    ("Momentum (TWRR vs ACWI)", "6m", lambda r: r["twrr_6m"], PCT),
+    ("Momentum (TWRR vs ACWI)", "12m", lambda r: r["twrr_12m"], PCT),
+    ("Momentum (TWRR vs ACWI)", "TWRR ponderato", lambda r: r["twrr_w"], PCT),
+    ("Momentum (TWRR vs ACWI)", "Score", lambda r: r["scores"]["momentum"], "score"),
+    ("Volume (rel. ACWI)", "Vol 20g/90g relativo", lambda r: r["vol_ratio_rel"], NUM),
+    ("Volume (rel. ACWI)", "Su/Giù relativo", lambda r: r["updown_rel"], NUM),
+    ("Volume (rel. ACWI)", "Score", lambda r: r["scores"]["volume"], "score"),
+    ("Volatilità (rel. ACWI)", "Tracking error 60g", lambda r: r["te_60d"], PCT),
+    ("Volatilità (rel. ACWI)", "Da max relativo 52w", lambda r: r["rel_drawdown"], PCT),
+    ("Volatilità (rel. ACWI)", "Vol titolo 60g", lambda r: r["vol_60d"], PCT),
+    ("Volatilità (rel. ACWI)", "Score", lambda r: r["scores"]["volatility"], "score"),
+    ("", "Score totale", lambda r: r["scores"]["total"], "score"),
+]
+
+STOCK_NOTES = [
+    "Universo: titoli USA del fondo iShares MSCI ACWI, classificati per settore (11 settori GICS).",
+    "Benchmark: ACWI. Tutte le caratteristiche sono calcolate sul prezzo relativo = prezzo titolo / prezzo ACWI.",
+    "TWRR (time-weighted relative return) = (1 + rendimento titolo) / (1 + rendimento ACWI) - 1 sulla stessa finestra.",
+    "TWRR ponderato = media delle finestre 1m/3m/6m/12m con pesi 4/3/2/1 (le finestre recenti contano di più).",
+    "Trend: prezzo relativo vs sue medie a 50 e 200 giorni. Rialzista = relativo > SMA50 > SMA200.",
+    "Volume: volume 20g/90g del titolo diviso lo stesso rapporto di ACWI; Su/Giù = volume nei giorni in cui il relativo sale / scende.",
+    "Volatilità: tracking error a 60g (dev. standard annualizzata dei rendimenti relativi), distanza dal massimo relativo a 52 settimane, volatilità del titolo. Più bassa = punteggio più alto.",
+    "Punteggi 0-100 = percentile dentro il settore. Classifica relativa, non un segnale operativo.",
+    "Feed IEX (gratuito): i volumi sono solo quelli della borsa IEX; i rapporti sono confrontabili, i valori assoluti no.",
+]
+
+
+def build_stocks(results: dict[str, dict], sector_names: dict[str, str], meta: dict) -> bytes:
+    """results: ETF -> {"top": [...], ...}. Un foglio per settore + foglio riepilogo se più settori."""
+    wb = Workbook()
+    wb.remove(wb.active)
+    cols = STOCK_COLUMNS
+    if len(results) > 1:
+        ws = wb.create_sheet("Tutti")
+        all_rows = []
+        for etf, res in results.items():
+            all_rows += [{**r, "sector": sector_names[etf]} for r in res["top"]]
+        _sheet(ws, [("", "Settore", lambda r: r["sector"], None), *cols], all_rows, freeze="D3")
+    for etf, res in results.items():
+        ws = wb.create_sheet(f"{etf} {sector_names[etf]}"[:31])
+        _sheet(ws, cols, res["top"], freeze="D3")
+    lines = [f"Aggiornato: {meta['updated']}"]
+    lines.append(f"Feed dati: {meta['feed']}" + (" (DATI SINTETICI)" if meta["demo"] else ""))
+    for etf, res in results.items():
+        lines.append(
+            f"{etf} {sector_names[etf]}: analizzati {res['n_analyzed']}, esclusi {res['n_skipped']} (storico < 1 anno o dati mancanti)"
+        )
+    _notes_sheet(wb, "Sector Lab - migliori aziende per settore", [*lines, "", *STOCK_NOTES])
+    return _save(wb)
