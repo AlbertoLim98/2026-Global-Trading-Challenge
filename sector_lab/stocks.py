@@ -16,7 +16,6 @@ from metrics import MIN_BARS, TRADING_DAYS, rsi, trend_label
 # finestre (giorni di borsa) -> peso: le più recenti contano di più
 TWRR_WINDOWS: dict[int, int] = {21: 4, 63: 3, 126: 2, 252: 1}
 TOP_N = 10
-MAX_WEIGHT = 0.25  # tetto al peso di un singolo titolo nella strategia alto beta
 
 STOCK_PILLARS: dict[str, dict[str, int]] = {
     "trend": {"rp_vs_sma200": 1, "rp_sma50_vs_sma200": 1, "rp_vs_sma50": 1},
@@ -90,25 +89,13 @@ def compute_relative(df: pd.DataFrame, bench: pd.DataFrame) -> dict | None:
     return out
 
 
-def cap_weights(raw: list[float], cap: float = MAX_WEIGHT) -> list[float]:
-    """Pesi proporzionali a `raw`, con tetto per titolo (l'eccesso va agli altri)."""
-    n = len(raw)
-    if n == 0:
+def score_shares(rows: list[dict]) -> list[float]:
+    """Quote (somma 1) proporzionali al punteggio totale, senza tetti. Parità se i punteggi mancano."""
+    pts = [(r["scores"]["total"] or 0.0) for r in rows]
+    tot = sum(pts)
+    if not rows:
         return []
-    cap = max(cap, 1 / n)  # con pochi titoli il tetto non può essere inferiore a 1/n
-    w, fixed = [0.0] * n, set()
-    while True:
-        free = [i for i in range(n) if i not in fixed]
-        room = 1 - cap * len(fixed)
-        tot = sum(raw[i] for i in free)
-        for i in free:
-            w[i] = room * raw[i] / tot if tot else room / len(free)
-        over = [i for i in free if w[i] > cap + 1e-12]
-        if not over:
-            return w
-        for i in over:
-            w[i] = cap
-            fixed.add(i)
+    return [x / tot for x in pts] if tot > 0 else [1 / len(rows)] * len(rows)
 
 
 def analyze_sector(universe: pd.DataFrame, bars: dict[str, pd.DataFrame], bench: pd.DataFrame):
@@ -140,6 +127,12 @@ def top_quality(rows: dict[str, dict], n_universe: int, top_n: int = TOP_N) -> d
         key=lambda r: -(r["scores"]["total"] if r["scores"]["total"] is not None else -1),
     )
     top = [{**r, "rank": i} for i, r in enumerate(ranked[:top_n], 1)]
+    ok = [
+        r for r in top if is_eligible(r)
+    ]  # il peso va ai soli titoli idonei, in base al punteggio
+    shares = dict(zip((r["symbol"] for r in ok), score_shares(ok), strict=True))
+    for r in top:
+        r["weight_in_sector"] = shares.get(r["symbol"], 0.0)
     return {
         "top": top,
         "n_analyzed": len(rows),
@@ -156,17 +149,17 @@ def is_eligible(r: dict) -> bool:
 def top_beta(rows: dict[str, dict], n_universe: int, top_n: int = TOP_N) -> dict:
     """Strategia alto beta: tra i titoli idonei, i `top_n` con beta più alto.
 
-    Pesi proporzionali al beta (tetto MAX_WEIGHT per titolo); beta di portafoglio = somma pesata.
+    Il beta serve a scegliere e ordinare i titoli; il peso nel settore segue il punteggio, senza
+    tetti per titolo. Il beta di portafoglio è la media dei beta pesata con quei pesi.
     """
     eligible = [r for r in rows.values() if is_eligible(r)]
     chosen = sorted(eligible, key=lambda r: -r["beta_1y"])[:top_n]
-    # beta negativi o nulli non meritano peso: base minima piccola ma positiva
-    w = cap_weights([max(r["beta_1y"], 0.01) for r in chosen])
+    w = score_shares(chosen)
     top = [
-        {**r, "rank": i, "strategy_weight": wi}
+        {**r, "rank": i, "weight_in_sector": wi, "strategy_weight": wi}
         for i, (r, wi) in enumerate(zip(chosen, w, strict=True), 1)
     ]
-    pbeta = sum(r["beta_1y"] * r["strategy_weight"] for r in top) if top else None
+    pbeta = sum(r["beta_1y"] * r["weight_in_sector"] for r in top) if top else None
     return {
         "top": top,
         "n_analyzed": len(rows),

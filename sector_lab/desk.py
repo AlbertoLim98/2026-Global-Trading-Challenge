@@ -420,6 +420,6 @@ def _slim_sector(r: dict) -> dict:
 def _slim_stock(r: dict) -> dict:
     keys = (
         "rank", "symbol", "name", "price", "trend_label", "twrr_w", "twrr_3m", "beta_1y",
-        "te_60d", "rel_drawdown", "scores", "strategy_weight",
+        "te_60d", "rel_drawdown", "scores", "weight_in_sector",
     )  # fmt: skip
     return {k: r.get(k) for k in keys}

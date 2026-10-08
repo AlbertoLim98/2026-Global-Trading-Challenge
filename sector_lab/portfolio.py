@@ -8,7 +8,7 @@ Regole (tutte modificabili in `Params`):
   1. Settori idonei: trend dell'ETF non ribassista e punteggio totale >= `min_sector_score`.
   2. Peso dei settori proporzionale al punteggio, senza tetto per settore (anche solo 2 settori vanno bene).
   3. Dentro il settore: solo le aziende della top 10 con trend relativo non ribassista e TWRR > 0,
-     peso proporzionale al punteggio (modalità qualità) o al peso beta (modalità alto beta),
+     peso proporzionale al punteggio (in modalità alto beta il beta sceglie i titoli, il punteggio li pesa),
      tetto `max_stock` (10%) del capitale per titolo; l'eccedenza passa agli altri titoli.
   4. Riserva di liquidità minima `cash_reserve`.
   5. Stop: posizione con perdita per azione > `atr_stop_mult` x ATR(14) -> vendita proposta con priorità
@@ -102,10 +102,7 @@ def _stock_raw(top: list[dict], p: Params, relaxed: bool) -> dict[str, tuple[flo
     rows = top if relaxed else [r for r in top if stocks.is_eligible(r)]
     out = {}
     for r in rows:
-        if p.mode == "beta":
-            w = r.get("strategy_weight") or max(r.get("beta_1y") or 0.0, 0.01)
-        else:
-            w = r["scores"]["total"] or 0
+        w = r["scores"]["total"] or 0  # il peso segue il punteggio (anche in modalità alto beta)
         if w > 0:
             out[r["symbol"]] = (w, r)
     return out

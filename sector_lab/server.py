@@ -29,6 +29,7 @@ import desk as desk_mod
 import export
 import journal as journal_mod
 import metrics
+import portfolio
 import stocks
 
 CACHE_TTL = 600  # secondi
@@ -45,6 +46,29 @@ class State:
     def fetch_bars(self, symbols: list[str]) -> dict:
         """Storico giornaliero di simboli arbitrari (dati demo o Alpaca)."""
         return data.demo_bars(symbols) if self.demo else data.fetch_bars(symbols, self.feed)
+
+    def portfolio_weights(self, mode: str, capital: float = 1_000_000.0) -> dict:
+        """Pesi reali dell'algoritmo di ribilanciamento: il titolo è valutato insieme agli altri settori."""
+        by_etf = {etf: self.stock_ranking(etf, mode=mode) for etf in data.SECTORS}
+        p = portfolio.Params(capital=capital, mode=mode)
+        tg = portfolio.build_targets(self.sectors()["sectors"], by_etf, p)
+        return {
+            "targets": {k: t["value"] / capital for k, t in tg["targets"].items()},
+            "sectors": {s["symbol"]: s["budget"] / capital for s in tg["sectors"]},
+            "notes": tg["notes"],
+        }
+
+    def stock_view(self, etf: str, mode: str = "quality", refresh: bool = False) -> dict:
+        """Top 10 del settore con il peso nel portafoglio calcolato sull'insieme dei settori."""
+        res = self.stock_ranking(etf, refresh, mode)
+        w = self.portfolio_weights(mode)
+        top = [{**r, "weight_portfolio": w["targets"].get(r["symbol"], 0.0)} for r in res["top"]]
+        return {
+            **res,
+            "top": top,
+            "sector_portfolio_weight": w["sectors"].get(etf, 0.0),
+            "notes": w["notes"],
+        }
 
     def bars(self, refresh: bool = False) -> dict:
         with self._lock:
@@ -183,9 +207,7 @@ def make_handler(state: State, desk: desk_mod.Desk, port: int) -> type[BaseHTTPR
                     elif etf not in data.SECTORS:
                         self._json({"error": f"settore sconosciuto: {etf}"}, 404)
                     else:
-                        self._json(
-                            {**state.stock_ranking(etf, "refresh" in q, mode), **state.meta()}
-                        )
+                        self._json({**state.stock_view(etf, mode, "refresh" in q), **state.meta()})
                 elif url.path == "/api/export_stocks.xlsx":
                     etf = (q.get("sector") or ["all"])[0].upper()
                     etfs = list(data.SECTORS) if etf == "ALL" else [etf]
@@ -195,7 +217,7 @@ def make_handler(state: State, desk: desk_mod.Desk, port: int) -> type[BaseHTTPR
                     elif any(e not in data.SECTORS for e in etfs):
                         self._json({"error": f"settore sconosciuto: {etf}"}, 404)
                     else:
-                        res = {e: state.stock_ranking(e, mode=mode) for e in etfs}
+                        res = {e: state.stock_view(e, mode) for e in etfs}
                         body = export.build_stocks(res, data.SECTORS, state.meta(), mode)
                         tag = ("tutti" if etf == "ALL" else etf) + (
                             "_altobeta" if mode == "beta" else ""

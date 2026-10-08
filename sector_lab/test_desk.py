@@ -491,3 +491,20 @@ def test_server_rejects_cross_site_posts_and_foreign_hosts(env):
         assert call("/api/account")[0] == 200
     finally:
         srv.shutdown()
+
+
+def test_stock_view_weights_come_from_the_real_allocation_across_sectors(env):
+    desk, _, _ = env
+    state = desk.state
+    views = {e: state.stock_view(e, "quality") for e in data.SECTORS}
+    total = sum(r["weight_portfolio"] for v in views.values() for r in v["top"])
+    assert total == pytest.approx(0.97)  # il 97% è distribuito tra le top 10 di tutti i settori
+    assert max(r["weight_portfolio"] for v in views.values() for r in v["top"]) <= 0.10 + 1e-9
+    for v in views.values():
+        assert sum(r["weight_portfolio"] for r in v["top"]) == pytest.approx(
+            v["sector_portfolio_weight"]
+        )
+        w = [r["weight_in_sector"] for r in v["top"]]
+        assert sum(w) == pytest.approx(1) or sum(w) == 0  # senza tetti: quote del punteggio
+    bv = state.stock_view("XLK", "beta")
+    assert all("weight_portfolio" in r and "weight_in_sector" in r for r in bv["top"])

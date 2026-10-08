@@ -166,15 +166,10 @@ STOCK_COLUMNS: list[Col] = [
     ("Beta (vs ACWI)", "Beta 1 anno", lambda r: r["beta_1y"], NUM),
     ("Beta (vs ACWI)", "Beta 6 mesi", lambda r: r["beta_6m"], NUM),
     ("Beta (vs ACWI)", "Correlazione 1a", lambda r: r["corr_1y"], NUM),
+    ("Pesi", "Peso nel settore", lambda r: r.get("weight_in_sector"), PCT),
+    ("Pesi", "Peso nel portafoglio", lambda r: r.get("weight_portfolio"), PCT),
     ("", "Score totale", lambda r: r["scores"]["total"], "score"),
 ]
-BETA_WEIGHT_COL: Col = (
-    "Strategia alto beta",
-    "Peso nel settore",
-    lambda r: r["strategy_weight"],
-    PCT,
-)
-
 STOCK_NOTES = [
     "Universo: titoli USA del fondo iShares MSCI ACWI, classificati per settore (11 settori GICS).",
     "Benchmark: ACWI. Tutte le caratteristiche sono calcolate sul prezzo relativo = prezzo titolo / prezzo ACWI.",
@@ -184,6 +179,12 @@ STOCK_NOTES = [
     "Volume: volume 20g/90g del titolo diviso lo stesso rapporto di ACWI; Su/Giù = volume nei giorni in cui il relativo sale / scende.",
     "Volatilità: tracking error a 60g (dev. standard annualizzata dei rendimenti relativi), distanza dal massimo relativo a 52 settimane, volatilità del titolo. Più bassa = punteggio più alto.",
     "Beta = cov(rend. titolo, rend. ACWI) / var(rend. ACWI) sui rendimenti giornalieri (1 anno e 6 mesi).",
+    "Peso nel settore = quota del titolo in proporzione al suo punteggio (solo titoli idonei), senza tetti.",
+    (
+        "Peso nel portafoglio = peso reale dell'algoritmo di ribilanciamento: il punteggio del titolo è "
+        "valutato insieme a quello degli altri settori (peso del settore x quota nel settore), con tetto "
+        "10% per titolo e 97% investito."
+    ),
     "Punteggi 0-100 = percentile dentro il settore. Classifica relativa, non un segnale operativo.",
     "Feed IEX (gratuito): i volumi sono solo quelli della borsa IEX; i rapporti sono confrontabili, i valori assoluti no.",
 ]
@@ -192,7 +193,7 @@ BETA_NOTES = [
     "STRATEGIA ALTO BETA (sistematica, solo acquisto): per ogni settore",
     "  1. Filtro: trend relativo non Ribassista e TWRR ponderato > 0 (il titolo sta battendo ACWI).",
     "  2. Priorità: tra gli idonei, i 10 con beta a 1 anno più alto.",
-    "  3. Pesi nel settore proporzionali al beta, con tetto del 25% per titolo (solo per la tabella delle aziende).",
+    "  3. Il beta sceglie i titoli; il peso nel settore segue il punteggio, senza tetto per titolo.",
     "  Se gli idonei sono meno di 10 la lista è più corta: nessun titolo non idoneo viene aggiunto.",
     "  Un beta alto amplifica sia i guadagni sia le perdite rispetto al mercato: è una scelta di rischio, non di qualità.",
 ]
@@ -204,11 +205,7 @@ def build_stocks(
     """results: ETF -> {"top": [...], ...}. Un foglio per settore + foglio riepilogo se più settori."""
     wb = Workbook()
     wb.remove(wb.active)
-    cols = (
-        [*STOCK_COLUMNS[:-1], BETA_WEIGHT_COL, STOCK_COLUMNS[-1]]
-        if mode == "beta"
-        else STOCK_COLUMNS
-    )
+    cols = STOCK_COLUMNS
     if len(results) > 1:
         ws = wb.create_sheet("Tutti")
         all_rows = []

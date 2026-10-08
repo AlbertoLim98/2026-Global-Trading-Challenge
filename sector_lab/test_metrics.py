@@ -173,12 +173,16 @@ def test_beta_of_scaled_benchmark_returns():
     )
 
 
-def test_cap_weights_sum_to_one_and_respect_cap():
+def test_score_shares_follow_score_with_no_cap():
     import stocks
 
-    w = stocks.cap_weights([5, 1, 1, 1, 1, 1, 1, 1, 1, 1])
-    assert sum(w) == pytest.approx(1) and max(w) <= 0.25 + 1e-9 and w[0] == pytest.approx(0.25)
-    assert sum(stocks.cap_weights([1, 1])) == pytest.approx(1)  # tetto non scende sotto 1/n
+    rows = [{"scores": {"total": t}} for t in (90.0, 5.0, 5.0)]
+    w = stocks.score_shares(rows)
+    assert w == pytest.approx([0.9, 0.05, 0.05]) and not hasattr(
+        stocks, "MAX_WEIGHT"
+    )  # nessun tetto al 25%
+    assert stocks.score_shares([{"scores": {"total": None}}] * 4) == pytest.approx([0.25] * 4)
+    assert stocks.score_shares([]) == []
 
 
 def test_beta_mode_filters_and_sorts_by_beta():
@@ -190,10 +194,12 @@ def test_beta_mode_filters_and_sorts_by_beta():
     betas = [t["beta_1y"] for t in r["top"]]
     assert betas == sorted(betas, reverse=True) and len(r["top"]) <= 10
     assert all(stocks.is_eligible(t) for t in r["top"])
-    assert sum(t["strategy_weight"] for t in r["top"]) == pytest.approx(1)
+    assert sum(t["weight_in_sector"] for t in r["top"]) == pytest.approx(1)
+    tot = sum(t["scores"]["total"] for t in r["top"])
+    assert all(t["weight_in_sector"] == pytest.approx(t["scores"]["total"] / tot) for t in r["top"])
     assert r["n_eligible"] == sum(stocks.is_eligible(x) for x in rows.values())
     assert r["portfolio_beta"] == pytest.approx(
-        sum(t["beta_1y"] * t["strategy_weight"] for t in r["top"])
+        sum(t["beta_1y"] * t["weight_in_sector"] for t in r["top"])
     )
 
 
@@ -211,4 +217,4 @@ def test_beta_export_has_weight_column():
         "XLK Tecnologia"
     ]
     heads = [c.value for c in ws[2]]
-    assert "Peso nel settore" in heads and "Beta 1 anno" in heads
+    assert {"Peso nel settore", "Peso nel portafoglio", "Beta 1 anno"} <= set(heads)
