@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sector Lab</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--ink:#1c2230;--mute:#6b7385;--line:#e3e6ec;--up:#12805c;--down:#c0392b;--acc:#2a5bd7}
+@media (prefers-color-scheme:dark){:root{--bg:#12151c;--card:#1a1f2a;--ink:#e6e9f0;--mute:#8d96a8;--line:#2a3140;--up:#3ec99a;--down:#ff7a6b;--acc:#7ea2ff}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:14px 16px;border-bottom:1px solid var(--line);background:var(--card)}
+h1{font-size:17px;margin:0;flex:1}
+.tabs button,.btn{background:none;border:1px solid var(--line);color:var(--ink);padding:6px 12px;border-radius:6px;cursor:pointer;font:inherit}
+.tabs button.on{background:var(--acc);border-color:var(--acc);color:#fff}
+main{padding:16px;max-width:1400px;margin:auto}
+.badge{font-size:12px;color:var(--mute)}
+.warn{background:#fff3cd;color:#664d03;padding:8px 12px;border-radius:6px;margin-bottom:12px;font-size:13px}
+.err{background:#fde8e6;color:#8a1f12;padding:10px 12px;border-radius:6px;margin-bottom:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:16px}
+.wrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;min-width:1080px}
+th,td{padding:6px 8px;text-align:right;white-space:nowrap;border-bottom:1px solid var(--line)}
+th{font-weight:600;font-size:12px;color:var(--mute);cursor:pointer;user-select:none}
+th.g{text-align:center;color:var(--ink);border-bottom:2px solid var(--acc);cursor:default}
+td:first-child,th:first-child{text-align:left}
+tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:color-mix(in srgb,var(--acc) 10%,transparent)}
+.up{color:var(--up)}.down{color:var(--down)}
+.sc{display:inline-block;min-width:38px;padding:1px 6px;border-radius:10px;font-weight:600;color:#10151f;text-align:center}
+.lab{font-size:12px;padding:1px 7px;border-radius:10px;border:1px solid var(--line)}
+.lab.Rialzista{color:var(--up);border-color:var(--up)}.lab.Ribassista{color:var(--down);border-color:var(--down)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.kpi b{display:block;font-size:20px}.kpi span{color:var(--mute);font-size:12px}
+svg{width:100%;height:auto;display:block}
+.legend span{margin-right:14px;font-size:12px}
+.note{color:var(--mute);font-size:12px;margin-top:8px}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<header>
+  <h1>Sector Lab <span class="badge" id="meta"></span></h1>
+  <div class="tabs"><button id="t-s" class="on">Settori</button><button id="t-p">Portafoglio paper</button></div>
+  <button class="btn" id="refresh">Aggiorna dati</button>
+</header>
+<main>
+  <div id="msg"></div>
+  <section id="v-s">
+    <div class="card wrap"><table id="tbl"></table>
+      <p class="note">Punteggi 0-100 = posizione del settore rispetto agli altri 10 (percentile), non un segnale operativo.
+      Trend: prezzo vs medie 50/200 giorni. Momentum: rendimenti 3/6/12 mesi e forza relativa vs SPY a 3 mesi.
+      Volume: volume medio 20g / 90g e rapporto volume nei giorni su/giù. Volatilità: più bassa = punteggio più alto (vol 60g, ATR, distanza dal massimo 52 settimane).</p></div>
+    <div class="card" id="detail" hidden>
+      <h3 id="d-title" style="margin-top:0"></h3>
+      <div class="legend"><span style="color:var(--ink)">&#9632; Prezzo</span><span style="color:#e08a1e">&#9632; SMA 50</span><span style="color:#9b59b6">&#9632; SMA 200</span></div>
+      <svg id="chart" viewBox="0 0 900 340"></svg>
+    </div>
+  </section>
+  <section id="v-p" hidden><div id="acct"></div></section>
+</main>
+<script>
+const $=s=>document.querySelector(s);
+const pct=(v,d=1)=>v==null?'–':(v*100).toFixed(d)+'%';
+const num=(v,d=2)=>v==null?'–':v.toFixed(d);
+const cls=v=>v==null?'':v>=0?'up':'down';
+const money=v=>v.toLocaleString('it-IT',{style:'currency',currency:'USD'});
+const heat=s=>s==null?'#ccc':`hsl(${Math.round(s*1.2)} 65% 62%)`;
+const pill=s=>`<span class="sc" style="background:${heat(s)}">${s==null?'–':Math.round(s)}</span>`;
+let DATA=null,sortKey='total',sortDir=-1,selected=null;
+
+const COLS=[
+ {g:'',c:[['name','Settore',r=>`<b>${r.name}</b> <span class="badge">${r.symbol}</span>`,r=>r.name],['price','Prezzo',r=>num(r.price),r=>r.price]]},
+ {g:'Trend',c:[['trend_label','Stato',r=>`<span class="lab ${r.trend_label}">${r.trend_label}</span>`,r=>r.scores.trend],
+   ['px_vs_sma200','vs SMA200',r=>`<span class="${cls(r.px_vs_sma200)}">${pct(r.px_vs_sma200)}</span>`,r=>r.px_vs_sma200],
+   ['sma50_vs_sma200','50 vs 200',r=>`<span class="${cls(r.sma50_vs_sma200)}">${pct(r.sma50_vs_sma200)}</span>`,r=>r.sma50_vs_sma200],
+   ['s_trend','Score',r=>pill(r.scores.trend),r=>r.scores.trend]]},
+ {g:'Momentum',c:[['ret_1m','1m',r=>`<span class="${cls(r.ret_1m)}">${pct(r.ret_1m)}</span>`,r=>r.ret_1m],
+   ['ret_3m','3m',r=>`<span class="${cls(r.ret_3m)}">${pct(r.ret_3m)}</span>`,r=>r.ret_3m],
+   ['ret_6m','6m',r=>`<span class="${cls(r.ret_6m)}">${pct(r.ret_6m)}</span>`,r=>r.ret_6m],
+   ['ret_12m','12m',r=>`<span class="${cls(r.ret_12m)}">${pct(r.ret_12m)}</span>`,r=>r.ret_12m],
+   ['rsi14','RSI',r=>num(r.rsi14,0),r=>r.rsi14],
+   ['rs_3m','RS 3m vs SPY',r=>`<span class="${cls(r.rs_3m)}">${pct(r.rs_3m)}</span>`,r=>r.rs_3m],
+   ['s_momentum','Score',r=>pill(r.scores.momentum),r=>r.scores.momentum]]},
+ {g:'Volume',c:[['vol_ratio_20_90','Vol 20g/90g',r=>num(r.vol_ratio_20_90),r=>r.vol_ratio_20_90],
+   ['updown_volume','Su/Giù',r=>num(r.updown_volume),r=>r.updown_volume],
+   ['s_volume','Score',r=>pill(r.scores.volume),r=>r.scores.volume]]},
+ {g:'Volatilità',c:[['vol_60d','Vol 60g',r=>pct(r.vol_60d),r=>r.vol_60d],
+   ['atr_pct','ATR%',r=>pct(r.atr_pct,2),r=>r.atr_pct],
+   ['drawdown_52w','Da max 52w',r=>`<span class="down">${pct(r.drawdown_52w)}</span>`,r=>r.drawdown_52w],
+   ['s_volatility','Score',r=>pill(r.scores.volatility),r=>r.scores.volatility]]},
+ {g:'',c:[['total','Totale',r=>pill(r.scores.total),r=>r.scores.total]]}
+];
+const flat=COLS.flatMap(g=>g.c);
+
+function render(){
+  const get=Object.fromEntries(flat.map(c=>[c[0],c[3]]));
+  const rows=[...DATA.sectors].sort((a,b)=>{const x=get[sortKey](a),y=get[sortKey](b);
+    if(x==null)return 1;if(y==null)return -1;return (x>y?1:x<y?-1:0)*sortDir});
+  let h='<thead><tr>'+COLS.map(g=>`<th class="g" colspan="${g.c.length}">${g.g}</th>`).join('')+'</tr><tr>'
+   +flat.map(c=>`<th data-k="${c[0]}">${c[1]}${c[0]===sortKey?(sortDir>0?' ▲':' ▼'):''}</th>`).join('')+'</tr></thead><tbody>';
+  h+=rows.map(r=>`<tr data-s="${r.symbol}" class="${r.symbol===selected?'sel':''}">`+flat.map(c=>`<td>${c[2](r)}</td>`).join('')+'</tr>').join('');
+  $('#tbl').innerHTML=h+'</tbody>';
+  $('#tbl').querySelectorAll('th[data-k]').forEach(th=>th.onclick=()=>{const k=th.dataset.k;
+    if(k===sortKey)sortDir*=-1;else{sortKey=k;sortDir=-1}render()});
+  $('#tbl').querySelectorAll('tbody tr').forEach(tr=>tr.onclick=()=>select(tr.dataset.s));
+}
+
+async function api(u){const r=await fetch(u);const j=await r.json();if(!r.ok)throw new Error(j.error||r.statusText);return j}
+function err(e){$('#msg').innerHTML=`<div class="err">${e.message}</div>`}
+
+async function load(refresh){
+  $('#msg').innerHTML='';$('#meta').textContent='caricamento…';
+  try{
+    DATA=await api('/api/sectors'+(refresh?'?refresh=1':''));
+    $('#meta').textContent=`· feed ${DATA.feed} · aggiornato ${DATA.updated}`;
+    let m='';
+    if(DATA.demo)m+='<div class="warn">MODALITÀ DEMO: dati sintetici, non reali.</div>';
+    else if(DATA.feed==='iex')m+='<div class="warn">Feed IEX (gratuito): i volumi sono solo quelli della borsa IEX, una piccola parte del totale. I rapporti tra volumi restano confrontabili, i valori assoluti no.</div>';
+    $('#msg').innerHTML=m;
+    render();
+    if(selected)select(selected);
+  }catch(e){$('#meta').textContent='';err(e)}
+}
+
+async function select(sym){
+  selected=sym;render();
+  const r=DATA.sectors.find(x=>x.symbol===sym);
+  $('#detail').hidden=false;$('#d-title').textContent=`${r.name} (${sym}) – ${r.trend_label}, ultimo dato ${r.last_date}`;
+  try{chart(await api('/api/history?symbol='+sym))}catch(e){err(e)}
+}
+
+function chart(h){
+  const W=900,H=340,L=48,R=10,T=10,PH=230,VT=250,VH=70,n=h.dates.length;
+  const ys=[...h.close,...h.sma50,...h.sma200].filter(v=>v!=null);
+  const lo=Math.min(...ys),hi=Math.max(...ys),pad=(hi-lo)*.05;
+  const x=i=>L+(W-L-R)*i/(n-1),y=v=>T+PH-(v-(lo-pad))/(hi-lo+2*pad)*PH;
+  const path=(a,c,w)=>{let d='',on=false;a.forEach((v,i)=>{if(v==null){on=false;return}d+=(on?'L':'M')+x(i).toFixed(1)+' '+y(v).toFixed(1);on=true});
+    return `<path d="${d}" fill="none" stroke="${c}" stroke-width="${w}"/>`};
+  let s='';
+  for(let k=0;k<=4;k++){const v=lo-pad+(hi-lo+2*pad)*k/4;s+=`<line x1="${L}" x2="${W-R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--line)"/><text x="${L-6}" y="${y(v)+4}" text-anchor="end" font-size="11" fill="var(--mute)">${v.toFixed(0)}</text>`}
+  s+=path(h.sma200,'#9b59b6',1.5)+path(h.sma50,'#e08a1e',1.5)+path(h.close,'var(--ink)',1.8);
+  const vm=Math.max(...h.volume),bw=Math.max(1,(W-L-R)/n-1);
+  h.volume.forEach((v,i)=>{const bh=v/vm*VH;s+=`<rect x="${x(i)-bw/2}" y="${VT+VH-bh}" width="${bw}" height="${bh}" fill="var(--mute)" opacity=".45"/>`});
+  [0,Math.floor(n/2),n-1].forEach(i=>s+=`<text x="${x(i)}" y="${H-2}" text-anchor="${i===0?'start':i===n-1?'end':'middle'}" font-size="11" fill="var(--mute)">${h.dates[i]}</text>`);
+  $('#chart').innerHTML=s;
+}
+
+async function loadAcct(){
+  const el=$('#acct');el.innerHTML='caricamento…';
+  try{
+    const a=await api('/api/account');const day=a.equity-a.last_equity;
+    el.innerHTML=`<div class="card grid">
+      <div class="kpi"><b>${money(a.equity)}</b><span>Patrimonio</span></div>
+      <div class="kpi"><b>${money(a.cash)}</b><span>Liquidità</span></div>
+      <div class="kpi"><b>${money(a.buying_power)}</b><span>Potere d'acquisto</span></div>
+      <div class="kpi"><b class="${cls(day)}">${money(day)}</b><span>Variazione giorno</span></div></div>
+      <div class="card wrap"><table style="min-width:600px"><thead><tr><th>Titolo</th><th>Qtà</th><th>Prezzo medio</th><th>Prezzo</th><th>Valore</th><th>P/L</th><th>P/L %</th></tr></thead><tbody>`
+      +(a.positions.length?a.positions.map(p=>`<tr><td><b>${p.symbol}</b></td><td>${p.qty}</td><td>${num(p.avg_entry)}</td><td>${num(p.price)}</td><td>${money(p.market_value)}</td><td class="${cls(p.pl)}">${money(p.pl)}</td><td class="${cls(p.pl_pct)}">${pct(p.pl_pct)}</td></tr>`).join(''):'<tr><td colspan="7" style="text-align:center;color:var(--mute)">Nessuna posizione aperta</td></tr>')
+      +'</tbody></table></div><p class="note">Conto paper in sola lettura: questa app non invia ordini.</p>';
+  }catch(e){el.innerHTML=`<div class="card">${e.message}</div>`}
+}
+
+$('#t-s').onclick=()=>{$('#v-s').hidden=false;$('#v-p').hidden=true;$('#t-s').classList.add('on');$('#t-p').classList.remove('on')};
+$('#t-p').onclick=()=>{$('#v-s').hidden=true;$('#v-p').hidden=false;$('#t-p').classList.add('on');$('#t-s').classList.remove('on');loadAcct()};
+$('#refresh').onclick=()=>load(true);
+load(false);
+</script>
+</body>
+</html>
