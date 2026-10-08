@@ -440,6 +440,28 @@ def test_portfolio_view_composition_pl_and_todays_movements(env):
     assert next(r for r in desk.portfolio()["positions"] if r["symbol"] == sym)["pl"] > 0
 
 
+def test_gain_per_reallocation(env):
+    desk, broker, prices = env
+    assert desk.portfolio()["rebalances"] == [] and desk.portfolio()["since_last"] is None
+    desk.run("quality", 1_000_000)
+    v1 = desk.portfolio()
+    assert len(v1["rebalances"]) == 1 and v1["rebalances"][0]["ongoing"]
+    assert v1["since_last"]["equity"] == pytest.approx(1_000_000.0)
+    assert v1["since_last"]["pl"] == pytest.approx(v1["account"]["equity"] - 1_000_000.0)
+    for sym in list(broker.pos):  # il mercato sale del 2%
+        prices[sym] *= 1.02
+    mid = desk.portfolio()["since_last"]["pl"]
+    assert mid > 0
+    desk.run("quality", 1_000_000)
+    v2 = desk.portfolio()
+    first, second = v2["rebalances"][1], v2["rebalances"][0]  # dalla più recente
+    assert not first["ongoing"] and second["ongoing"]
+    assert first["end_equity"] == pytest.approx(second["equity"]) and first["pl"] == pytest.approx(
+        mid
+    )
+    assert first["pl_pct"] == pytest.approx(first["end_equity"] / first["equity"] - 1)
+
+
 def test_reposition_only_for_failed(env):
     desk, _, _ = env
     desk.run("quality", 1_000_000)

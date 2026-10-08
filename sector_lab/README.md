@@ -89,8 +89,8 @@ Queste regole **riducono** il rischio di perdite, non lo eliminano: nessun algor
 guadagni senza perdite.
 
 La scheda **Portafoglio paper** mostra la composizione (titoli con peso, P/L di oggi e totale; liquidità;
-ripartizione per settore), il guadagno/perdita di oggi e da apertura portafoglio (patrimonio al primo
-ribilanciamento registrato) e, in un elenco a parte, i movimenti eseguiti oggi (giorno di borsa di New York).
+ripartizione per settore), il guadagno/perdita dall'ultima riallocazione, per ogni riallocazione (patrimonio al via di una e della
+successiva) e da apertura portafoglio (patrimonio al primo ribilanciamento registrato) e, in un elenco a parte, i movimenti eseguiti oggi (giorno di borsa di New York).
 
 **Titoli non negoziabili:** a ogni ribilanciamento il programma chiede ad Alpaca l'elenco delle azioni
 attive e negoziabili ed esclude dall'elenco quelle che non lo sono (fusi, ritirati, sospesi: es. un

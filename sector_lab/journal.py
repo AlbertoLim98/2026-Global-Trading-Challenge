@@ -160,6 +160,26 @@ class Journal:
             ).fetchone()
         return r["run_id"] if r else None
 
+    def runs(self) -> list[dict]:
+        """Riallocazioni (esecuzioni complete) dalla più vecchia: data, patrimonio al via, modalità."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT ts, run_id, payload FROM events WHERE kind = 'RUN' ORDER BY id ASC"
+            ).fetchall()
+        out = []
+        for r in rows:
+            p = json.loads(r["payload"])
+            out.append(
+                {
+                    "run_id": r["run_id"],
+                    "ts": r["ts"],
+                    "equity": (p.get("account") or {}).get("equity"),
+                    "mode": (p.get("params") or {}).get("mode"),
+                    "n_orders": p.get("n_proposals", 0),
+                }
+            )
+        return out
+
     def opening(self) -> dict | None:
         """Apertura del portafoglio: data e patrimonio del conto al primo ribilanciamento registrato."""
         with self._lock:

@@ -413,6 +413,19 @@ class Desk:
         for d in by_sector.values():
             d["weight"] = d["value"] / equity if equity else 0.0
         day_pl = equity - acct["last_equity"]
+        runs = [r for r in self.journal.runs() if r["equity"]]
+        rebalances = []
+        for i, r in enumerate(runs):
+            end = runs[i + 1]["equity"] if i + 1 < len(runs) else equity
+            rebalances.append(
+                {
+                    **r,
+                    "end_equity": end,
+                    "ongoing": i + 1 == len(runs),
+                    "pl": end - r["equity"],
+                    "pl_pct": end / r["equity"] - 1,
+                }
+            )
         opening = self.journal.opening()
         base = opening["equity"] if opening else None
         return {
@@ -421,6 +434,8 @@ class Desk:
             "cash_weight": acct["cash"] / equity if equity else 0.0,
             "day_pl": day_pl,
             "day_pl_pct": day_pl / acct["last_equity"] if acct["last_equity"] else None,
+            "rebalances": rebalances[::-1],  # dalla più recente
+            "since_last": rebalances[-1] if rebalances else None,
             "opening": opening,
             "since_open_pl": equity - base if base else None,
             "since_open_pct": (equity / base - 1) if base else None,
