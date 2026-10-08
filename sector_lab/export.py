@@ -166,6 +166,7 @@ STOCK_COLUMNS: list[Col] = [
     ("Beta (vs ACWI)", "Beta 1 anno", lambda r: r["beta_1y"], NUM),
     ("Beta (vs ACWI)", "Beta 6 mesi", lambda r: r["beta_6m"], NUM),
     ("Beta (vs ACWI)", "Correlazione 1a", lambda r: r["corr_1y"], NUM),
+    ("Pesi", "Score indice settore", lambda r: r.get("sector_score"), "score"),
     ("Pesi", "Peso nel settore", lambda r: r.get("weight_in_sector"), PCT),
     ("Pesi", "Peso nel portafoglio", lambda r: r.get("weight_portfolio"), PCT),
     ("", "Score totale", lambda r: r["scores"]["total"], "score"),
@@ -179,10 +180,11 @@ STOCK_NOTES = [
     "Volume: volume 20g/90g del titolo diviso lo stesso rapporto di ACWI; Su/Giù = volume nei giorni in cui il relativo sale / scende.",
     "Volatilità: tracking error a 60g (dev. standard annualizzata dei rendimenti relativi), distanza dal massimo relativo a 52 settimane, volatilità del titolo. Più bassa = punteggio più alto.",
     "Beta = cov(rend. titolo, rend. ACWI) / var(rend. ACWI) sui rendimenti giornalieri (1 anno e 6 mesi).",
+    "Score indice settore = punteggio totale dell'ETF del settore (tabella Settori), confrontato con quello degli altri 10 settori.",
     "Peso nel settore = quota del titolo in proporzione al suo punteggio (solo titoli idonei), senza tetti.",
     (
         "Peso nel portafoglio = peso reale dell'algoritmo di ribilanciamento: il punteggio del titolo è "
-        "valutato insieme a quello degli altri settori (peso del settore x quota nel settore), con tetto "
+        "valutato insieme ai punteggi degli indici degli altri settori (peso del settore x quota nel settore), con tetto "
         "10% per titolo e 97% investito."
     ),
     "Punteggi 0-100 = percentile dentro il settore. Classifica relativa, non un segnale operativo.",

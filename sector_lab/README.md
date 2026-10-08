@@ -47,7 +47,7 @@ Nella scheda "Aziende" la modalità **Strategia alto beta** dà priorità ai bet
 Se gli idonei sono meno di 10 la lista è più corta. Un beta alto amplifica guadagni e perdite
 rispetto al mercato. Nella tabella ci sono due pesi: **Peso settore** (quota del titolo in proporzione al punteggio, senza tetti)
 e **Peso portafoglio** (peso reale dell'algoritmo di ribilanciamento, dove il punteggio del titolo è
-valutato insieme a quello degli altri settori: tetto 10% per titolo, 97% investito). Per questo la
+valutato insieme ai punteggi degli indici degli altri settori, cioè peso del settore ∝ punteggio dell'ETF, poi quota del titolo nel settore: tetto 10% per titolo, 97% investito). Per questo la
 scheda, la prima volta, scarica anche gli altri settori. Anche questa lista si scarica in Excel.
 
 ## Ribilanciamento giornaliero e ordini (schede "Ribilancio" e "Journal")

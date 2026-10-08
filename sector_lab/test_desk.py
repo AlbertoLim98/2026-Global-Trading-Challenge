@@ -506,5 +506,7 @@ def test_stock_view_weights_come_from_the_real_allocation_across_sectors(env):
         )
         w = [r["weight_in_sector"] for r in v["top"]]
         assert sum(w) == pytest.approx(1) or sum(w) == 0  # senza tetti: quote del punteggio
+    secs = {x["symbol"]: x["scores"]["total"] for x in state.sectors()["sectors"]}
+    assert all(r["sector_score"] == secs[e] for e, v in views.items() for r in v["top"])
     bv = state.stock_view("XLK", "beta")
     assert all("weight_portfolio" in r and "weight_in_sector" in r for r in bv["top"])

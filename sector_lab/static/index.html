@@ -80,7 +80,7 @@ svg{width:100%;height:auto;display:block}
       <p class="note">Le migliori 10 aziende del settore tra i titoli USA del fondo iShares ACWI, valutate sul <b>prezzo relativo ad ACWI</b> (prezzo titolo / prezzo ACWI).
       Momentum = rendimento relativo ponderato nel tempo (TWRR): (1+rend. titolo)/(1+rend. ACWI)-1 su 1/3/6/12 mesi con pesi 4/3/2/1.
       Trend: prezzo relativo vs sue medie 50/200g. Volume: rapporto 20g/90g del titolo diviso quello di ACWI. Volatilità: tracking error 60g, distanza dal massimo relativo a 52 settimane e volatilità del titolo (più bassa = punteggio più alto).
-      Punteggi 0-100 = percentile dentro il settore. <b>Peso settore</b> = quota del titolo in proporzione al suo punteggio, senza tetti. <b>Peso portafoglio</b> = peso reale nel ribilanciamento: il punteggio è valutato insieme a quello degli altri settori (tetto 10% per titolo, 97% investito). Non è un segnale operativo.</p>
+      Punteggi 0-100 = percentile dentro il settore. <b>Peso settore</b> = quota del titolo in proporzione al suo punteggio, senza tetti. <b>Score indice</b> = punteggio dell'ETF del settore (tabella Settori). <b>Peso portafoglio</b> = peso reale nel ribilanciamento: il punteggio del titolo è valutato insieme ai punteggi degli indici di tutti gli altri settori (peso del settore ∝ punteggio dell'indice, poi quota del titolo nel settore) (tetto 10% per titolo, 97% investito). Non è un segnale operativo.</p>
       <p class="note" id="a-beta-note" hidden><b>Strategia alto beta:</b> si considerano solo i titoli con trend relativo non ribassista e TWRR ponderato positivo (che stanno battendo ACWI); tra questi si scelgono i 10 con beta a 1 anno più alto e si pesano in proporzione al punteggio (il beta sceglie i titoli, il peso segue il punteggio, senza tetto per titolo). Un beta alto amplifica guadagni e perdite rispetto al mercato.</p></div>
   </section>
   <section id="v-r" hidden>
@@ -241,10 +241,11 @@ const SCOLS=[
  ['Score',r=>pill(r.scores.volatility)],
  ['Beta 1a',r=>`<b>${num(r.beta_1y)}</b>`],
  ['Beta 6m',r=>num(r.beta_6m)],
+ ['Score indice',r=>pill(r.sector_score)],
  ['Peso settore',r=>pct(r.weight_in_sector)],
  ['Peso portafoglio',r=>`<b>${pct(r.weight_portfolio)}</b>`],
  ['Totale',r=>pill(r.scores.total)]];
-const SGROUPS=[['',3],['Trend (vs ACWI)',3],['Momentum (TWRR vs ACWI)',6],['Volume',3],['Volatilità',3],['Beta',2],['Pesi',2],['',1]];
+const SGROUPS=[['',3],['Trend (vs ACWI)',3],['Momentum (TWRR vs ACWI)',6],['Volume',3],['Volatilità',3],['Beta',2],['Pesi',3],['',1]];
 
 const POSTH={'Content-Type':'application/json','X-Sector-Lab':'1'};
 async function post(u,b){const r=await fetch(u,{method:'POST',headers:POSTH,body:JSON.stringify(b||{})});const j=await r.json();if(!r.ok)throw new Error(j.error||r.statusText);return j}

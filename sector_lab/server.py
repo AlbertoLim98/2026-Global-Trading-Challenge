@@ -62,7 +62,16 @@ class State:
         """Top 10 del settore con il peso nel portafoglio calcolato sull'insieme dei settori."""
         res = self.stock_ranking(etf, refresh, mode)
         w = self.portfolio_weights(mode)
-        top = [{**r, "weight_portfolio": w["targets"].get(r["symbol"], 0.0)} for r in res["top"]]
+        sec = next(x for x in self.sectors()["sectors"] if x["symbol"] == etf)
+        sector_score = (sec.get("scores") or {}).get("total")
+        top = [
+            {
+                **r,
+                "weight_portfolio": w["targets"].get(r["symbol"], 0.0),
+                "sector_score": sector_score,
+            }
+            for r in res["top"]
+        ]
         return {
             **res,
             "top": top,
