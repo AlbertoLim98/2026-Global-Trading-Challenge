@@ -170,84 +170,189 @@ def env(tmp_path):
     syms = [*data.load_universe().ticker, data.STOCK_BENCHMARK, *data.SECTORS, data.BENCHMARK]
     prices = {k: float(v["close"].iloc[-1]) for k, v in data.demo_bars(syms).items()}
     broker = broker_mod.DemoBroker(1_000_000.0, prices)
-    desk = desk_mod.Desk(state, broker, journal_mod.Journal(tmp_path / "j.db"))
+    desk = desk_mod.Desk(state, broker, journal_mod.Journal(tmp_path / "j.db"), settle_seconds=0)
     return desk, broker, prices
 
 
-def test_daily_run_then_decisions_are_journaled(env):
+def _statuses(desk):
+    return [t["status"] for t in desk.trades()]
+
+
+def test_run_sends_all_orders_automatically_and_journals_everything(env):
     desk, broker, _ = env
     res = desk.run("quality", 1_000_000)
-    props = desk.open_proposals()
-    assert res["n_targets"] > 0 and props and all(p["kind"] == "BUY" for p in props)
-    kinds = {e["kind"] for e in desk.journal.events()}
-    assert {"RUN", "PROPOSAL"} <= kinds
+    out = res["outcome"]
+    assert out["total"] > 0 and out["filled"] == out["total"] and out["failed"] == 0
+    assert len(broker.positions()) == out["total"] and len(broker.orders) == out["total"]
+    events = desk.journal.events(10_000)
+    kinds = [e["kind"] for e in events]
+    assert kinds.count("DECISION") == out["total"] and kinds.count("ORDER") == out["total"]
+    assert all(e["payload"]["action"] == "auto" for e in events if e["kind"] == "DECISION")
     run_evt = desk.journal.events(kind="RUN")[0]["payload"]
-    assert (
-        run_evt["sector_table"] and run_evt["stock_tables"] and run_evt["targets"]
-    )  # tabelle registrate
-
-    a, b, c = props[0], props[1], props[2]
-    out = desk.decide(a["id"], "execute")
-    assert out["status"] == "filled" and a["symbol"] in {p["symbol"] for p in broker.positions()}
-    assert desk.decide(b["id"], "reject")["status"] == "rejected"
-    sn = desk.decide(c["id"], "snooze")
-    assert sn["status"] == "snoozed" and sn["snooze_until"]
-    with pytest.raises(desk_mod.DeskError):
-        desk.decide(a["id"], "execute")  # già eseguita: niente doppio ordine
-    kinds = [e["kind"] for e in desk.journal.events(1000)]
-    assert "ORDER" in kinds and kinds.count("DECISION") >= 3
-    assert len(broker.orders) == 1
-    left = {p["id"]: p for p in desk.open_proposals()}
-    assert (
-        c["id"] in left and left[c["id"]]["status"] == "snoozed" and left[c["id"]]["due"] is False
-    )
+    assert run_evt["sector_table"] and run_evt["stock_tables"] and run_evt["targets"]
+    # nessuna operazione resta da approvare: tutte eseguite
+    assert set(_statuses(desk)) == {"filled"}
 
 
-def test_new_run_supersedes_open_proposals(env):
+def test_second_daily_run_proposes_nothing_when_portfolio_is_in_line(env):
     desk, _, _ = env
     desk.run("quality", 1_000_000)
-    first = {p["id"] for p in desk.open_proposals()}
-    desk.run("beta", 1_000_000)
-    now_open = {p["id"] for p in desk.open_proposals()}
-    assert first and not (first & now_open)
-    assert any(e["kind"] == "SUPERSEDED" for e in desk.journal.events(5000))
+    assert desk.run("quality", 1_000_000)["outcome"]["total"] == 0
 
 
-def test_stop_flow_sells_position(env):
+def test_sells_are_sent_before_buys(env):
+    desk, broker, prices = env
+    sym = next(s for s in data.load_universe().ticker if s not in ())
+    # una posizione fuori target (qualsiasi titolo dell'universo non selezionato) viene venduta per prima
+    held = [s for s in prices if s in desk.managed][:1][0]
+    broker.pos[held] = {"qty": 10.0, "avg_entry": prices[held]}
+    desk.run("quality", 1_000_000)
+    sent = [e["payload"] for e in reversed(desk.journal.events(10_000)) if e["kind"] == "DECISION"]
+    sides = [x["side"] for x in sent]
+    assert "sell" in sides and sides.index("buy") > max(
+        i for i, v in enumerate(sides) if v == "sell"
+    )
+    assert sym
+
+
+def test_stop_check_sells_automatically(env):
     desk, broker, prices = env
     sym = next(s for s in data.load_universe().ticker if s in prices)
-    px = prices[sym]
-    broker.pos[sym] = {"qty": 50.0, "avg_entry": px * 1.5}  # perdita enorme: oltre 1 ATR
+    broker.pos[sym] = {"qty": 50.0, "avg_entry": prices[sym] * 1.5}  # perdita enorme: oltre 1 ATR
     res = desk.stop_check()
-    assert res["n_new"] == 1
-    stop = next(p for p in desk.open_proposals() if p["kind"] == "STOP")
-    assert stop["symbol"] == sym and stop["priority"] == 0
-    assert desk.stop_check()["n_new"] == 0  # nessun duplicato
-    assert desk.decide(stop["id"], "execute")["status"] == "filled"
+    assert res["n_new"] == 1 and res["outcome"]["filled"] == 1
     assert sym not in {p["symbol"] for p in broker.positions()}
+    stop = next(t for t in desk.trades() if t["kind"] == "STOP")
+    assert stop["symbol"] == sym and stop["priority"] == 0 and stop["status"] == "filled"
+    assert desk.stop_check()["n_new"] == 0
 
 
-def test_execute_after_position_gone_is_voided(env):
+def test_failed_orders_are_reported_and_can_be_repositioned_at_current_price(env, monkeypatch):
     desk, broker, prices = env
-    sym = next(iter(data.load_universe().ticker))
-    broker.pos[sym] = {"qty": 10.0, "avg_entry": prices[sym] * 2}
-    desk.stop_check()
-    stop = next(p for p in desk.open_proposals() if p["kind"] == "STOP")
-    broker.pos.clear()
+
+    def boom(*a, **k):
+        raise RuntimeError("rete caduta")
+
+    monkeypatch.setattr(broker, "submit_market", boom)
+    out = desk.run("quality", 1_000_000)["outcome"]
+    assert out["total"] > 0 and out["failed"] == out["total"] and out["filled"] == 0
+    failed = [t for t in desk.trades() if t["status"] == "failed"]
+    assert all("rete caduta" in t["error"] for t in failed)
+    kinds = [e["kind"] for e in desk.journal.events(10_000)]
+    assert kinds.count("TRADE_FAILED") == len(failed)
+
+    monkeypatch.undo()
+    t = failed[0]
+    prices[t["symbol"]] *= 1.03  # il prezzo si è mosso: si usa quello attuale
+    r = desk.reposition(t["id"])
+    assert r["status"] == "filled" and r["limit_price"] == pytest.approx(prices[t["symbol"]])
+    assert desk.journal.get_proposal(t["id"])["status"] == "repositioned"
+    new = desk.journal.get_proposal(r["new_id"])
+    assert (
+        new["parent_id"] == t["id"] and new["order_type"] == "limit" and new["status"] == "filled"
+    )
+    assert t["symbol"] in {p["symbol"] for p in broker.positions()}
     with pytest.raises(desk_mod.DeskError):
-        desk.decide(stop["id"], "execute")
-    assert desk.journal.get_proposal(stop["id"])["status"] == "void"
+        desk.reposition(t["id"])  # già riposizionata: niente doppio ordine
+    assert any(e["kind"] == "REPOSITION" for e in desk.journal.events(10_000))
 
 
-def test_broker_error_is_journaled_and_proposal_stays_open(env):
+def test_rejected_and_partially_filled_orders_are_failures(env, monkeypatch):
     desk, broker, _ = env
+    calls = []
+
+    def fake(symbol, side, qty, client_id):
+        calls.append(qty)
+        if len(calls) == 1:
+            return {
+                "order_id": "o1",
+                "order_status": "rejected",
+                "filled_qty": 0.0,
+                "filled_avg_price": None,
+            }
+        return {
+            "order_id": f"o{len(calls)}",
+            "order_status": "expired",
+            "filled_qty": qty // 2,
+            "filled_avg_price": 10.0,
+        }
+
+    monkeypatch.setattr(broker, "submit_market", fake)
     desk.run("quality", 1_000_000)
-    p = desk.open_proposals()[0]
-    broker.cash = 0  # il broker rifiuterà l'acquisto
+    failed = {t["order_id"]: t for t in desk.trades() if t["status"] == "failed"}
+    assert failed["o1"]["error"] == "ordine rejected" and failed["o1"]["remaining_qty"] == calls[0]
+    part = failed["o2"]
+    assert "eseguite" in part["error"] and part["remaining_qty"] == calls[1] - calls[1] // 2
+
+
+def test_buying_power_shortage_is_a_reported_failure_not_a_crash(env, monkeypatch):
+    desk, broker, _ = env
+    orig = broker.account
+    monkeypatch.setattr(broker, "account", lambda: {**orig(), "buying_power": 0.0})
+    out = desk.run("quality", 1_000_000)["outcome"]
+    assert out["failed"] > 0 and out["failed"] == out["total"]
+    errs = [t["error"] for t in desk.trades() if t["status"] == "failed"]
+    assert all("potere d'acquisto" in e for e in errs)
+
+
+def test_scarce_cash_scales_buys_down_instead_of_failing(env):
+    desk, broker, _ = env
+    broker.cash = 100_000.0
+    out = desk.run("quality", 1_000_000)["outcome"]
+    assert out["failed"] == 0 and out["filled"] == out["total"]
+    assert broker.account()["cash"] >= 0.03 * 1_000_000 - 1  # la riserva del 3% viene rispettata
+
+
+def test_open_orders_block_a_new_run_until_resolved(env, monkeypatch):
+    desk, broker, _ = env
+
+    def queued(symbol, side, qty, client_id):
+        return {
+            "order_id": f"q-{client_id}",
+            "order_status": "accepted",
+            "filled_qty": 0.0,
+            "filled_avg_price": None,
+        }
+
+    monkeypatch.setattr(broker, "submit_market", queued)
+    assert desk.run("quality", 1_000_000)["outcome"]["in_progress"] > 0
+    with pytest.raises(desk_mod.DeskError, match="ordini ancora in corso"):
+        desk.run("quality", 1_000_000)
+    monkeypatch.setattr(
+        broker,
+        "get_order",
+        lambda oid: {
+            "order_id": oid,
+            "order_status": "filled",
+            "filled_qty": 1.0,
+            "filled_avg_price": 1.0,
+        },
+    )
+    assert desk.refresh_orders() > 0 and "submitted" not in _statuses(desk)
+
+
+def test_new_run_archives_old_failures(env, monkeypatch):
+    desk, broker, _ = env
+
+    def boom(*a, **k):
+        raise RuntimeError("giù")
+
+    monkeypatch.setattr(broker, "submit_market", boom)
+    desk.run("quality", 1_000_000)
+    old = {t["id"] for t in desk.trades() if t["status"] == "failed"}
+    monkeypatch.undo()
+    desk.run("quality", 1_000_000)
+    assert old and all(desk.journal.get_proposal(i)["status"] == "superseded" for i in old)
+
+
+def test_reposition_only_for_failed(env):
+    desk, _, _ = env
+    desk.run("quality", 1_000_000)
+    ok = desk.trades()[0]
     with pytest.raises(desk_mod.DeskError):
-        desk.decide(p["id"], "execute")
-    assert desk.journal.get_proposal(p["id"])["status"] == "pending"
-    assert any(e["kind"] == "ERROR" for e in desk.journal.events(50))
+        desk.reposition(ok["id"])
+    with pytest.raises(desk_mod.DeskError):
+        desk.reposition("inesistente")
 
 
 def test_server_rejects_cross_site_posts_and_foreign_hosts(env):
@@ -273,15 +378,15 @@ def test_server_rejects_cross_site_posts_and_foreign_hosts(env):
             return e.code, json.loads(e.read() or b"{}")
 
     try:
-        assert call("/api/proposal/decide", "POST")[0] == 403  # senza intestazione
+        assert call("/api/trade/reposition", "POST")[0] == 403  # senza intestazione
         assert (
-            call("/api/proposal/decide", "POST", {"X-Sector-Lab": "1", "Host": "evil.example"})[0]
+            call("/api/trade/reposition", "POST", {"X-Sector-Lab": "1", "Host": "evil.example"})[0]
             == 403
         )
         assert call("/api/account", headers={"Host": "evil.example"})[0] == 403
         assert (
             call(
-                "/api/proposal/decide",
+                "/api/trade/reposition",
                 "POST",
                 {"X-Sector-Lab": "1"},
                 b'{"id": "x", "action": "execute"}',
@@ -291,19 +396,3 @@ def test_server_rejects_cross_site_posts_and_foreign_hosts(env):
         assert call("/api/account")[0] == 200
     finally:
         srv.shutdown()
-
-
-def test_broker_exception_during_submit_is_journaled(env, monkeypatch):
-    desk, broker, _ = env
-    desk.run("quality", 1_000_000)
-    p = desk.open_proposals()[0]
-
-    def boom(*a, **k):
-        raise RuntimeError("rete caduta")
-
-    monkeypatch.setattr(broker, "submit_market", boom)
-    with pytest.raises(desk_mod.DeskError, match="rete caduta"):
-        desk.decide(p["id"], "execute")
-    assert desk.journal.get_proposal(p["id"])["status"] == "pending"
-    errs = [e["payload"]["message"] for e in desk.journal.events(50) if e["kind"] == "ERROR"]
-    assert any("rete caduta" in m for m in errs)

@@ -146,8 +146,8 @@ def make_handler(state: State, desk: desk_mod.Desk, port: int) -> type[BaseHTTPR
                     self._json(desk.run(mode, capital))
                 elif url.path == "/api/rebalance/stops":
                     self._json(desk.stop_check())
-                elif url.path == "/api/proposal/decide":
-                    self._json(desk.decide(str(body.get("id", "")), str(body.get("action", ""))))
+                elif url.path == "/api/trade/reposition":
+                    self._json(desk.reposition(str(body.get("id", ""))))
                 else:
                     self._json({"error": "non trovato"}, 404)
             except desk_mod.DeskError as e:
@@ -214,9 +214,11 @@ def make_handler(state: State, desk: desk_mod.Desk, port: int) -> type[BaseHTTPR
                     self._json({**acc, "positions": pos, "broker": desk.broker.name})
                 elif url.path == "/api/rebalance/proposals":
                     desk.refresh_orders()
+                    trades = desk.trades()
                     self._json(
                         {
-                            "proposals": desk.open_proposals(),
+                            "trades": trades,
+                            "n_failed": sum(t["status"] == "failed" for t in trades),
                             "market": desk.broker.clock(),
                             "broker": desk.broker.name,
                         }

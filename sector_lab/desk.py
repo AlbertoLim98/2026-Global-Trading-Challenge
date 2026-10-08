@@ -1,28 +1,30 @@
-"""Orchestrazione del ribilanciamento: tabelle -> target -> proposte -> decisione -> ordine -> journal.
+"""Orchestrazione del ribilanciamento: tabelle -> target -> operazioni -> invio automatico -> journal.
 
-Nessun ordine parte senza una decisione esplicita dell'utente su quella singola proposta
-(eseguire ora, rifiutare, rimandare di 1 ora).
+Premendo "Avvia ribilanciamento" (o "Controlla stop") le operazioni calcolate vengono inviate da sole
+al conto paper: prima le vendite, poi gli acquisti. Non c'è un passaggio di approvazione per singola
+operazione. Ogni operazione non andata a buon fine (ordine rifiutato, annullato, scaduto, eseguito
+solo in parte, errore del broker) viene segnalata e si può riposizionare a prezzo attuale.
 """
 
 from __future__ import annotations
 
 import math
+import time
 import uuid
-from datetime import timedelta
 from typing import Any
 
 import data
 import metrics
 import portfolio
-from journal import OPEN_STATUSES, Journal, iso, now
+from journal import Journal, now
 
-SNOOZE = timedelta(hours=1)
-FINAL_ORDER = {
-    "filled": "filled",
-    "canceled": "canceled",
-    "expired": "canceled",
-    "rejected": "canceled",
-}
+SETTLE_SECONDS = 15  # attesa massima dell'esito delle vendite prima di inviare gli acquisti
+FAILED_ORDER = {"canceled", "expired", "rejected", "suspended", "done_for_day"}
+# campi dello stato dell'invio, da non copiare in una operazione riposizionata
+_RUNTIME = {
+    "status", "snooze_until", "updated", "run_id", "error", "remaining_qty", "order_id",
+    "exec_qty", "filled_qty", "filled_avg_price", "order_type", "shortfall",
+}  # fmt: skip
 
 
 class DeskError(Exception):
@@ -30,8 +32,11 @@ class DeskError(Exception):
 
 
 class Desk:
-    def __init__(self, state: Any, broker: Any, journal: Journal) -> None:
+    def __init__(
+        self, state: Any, broker: Any, journal: Journal, settle_seconds: float = SETTLE_SECONDS
+    ) -> None:
         self.state, self.broker, self.journal = state, broker, journal
+        self.settle_seconds = settle_seconds
         self.universe = data.load_universe()
         self.managed = {
             r.ticker: {"name": r.name, "sector": r.sector_etf} for r in self.universe.itertuples()
@@ -58,6 +63,14 @@ class Desk:
             raise DeskError(f"modalità sconosciuta: {mode}")
         if capital < 10_000:
             raise DeskError("capitale troppo basso")
+        self.refresh_orders()
+        busy = self.journal.proposals(("submitted",))
+        if busy:
+            names = ", ".join(sorted({b["symbol"] for b in busy})[:8])
+            raise DeskError(
+                f"Ci sono {len(busy)} ordini ancora in corso ({names}): attendi il loro esito "
+                "prima di rilanciare, per non duplicare gli ordini"
+            )
         p = portfolio.Params(capital=capital, mode=mode)
         run_id = now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
 
@@ -81,7 +94,7 @@ class Desk:
                 f"({capital:,.0f}$): gli acquisti sono limitati dalla liquidità disponibile"
             )
 
-        superseded = self.journal.supersede_open(run_id)
+        superseded = self.journal.supersede_failed(run_id)
         self.journal.log(
             "RUN",
             {
@@ -101,6 +114,7 @@ class Desk:
         )
         for pr in res["proposals"]:
             self.journal.add_proposal(run_id, pr)
+        outcome = self._execute_all([pr["id"] for pr in res["proposals"]])
         return {
             "run_id": run_id,
             "params": p.as_dict(),
@@ -109,136 +123,153 @@ class Desk:
             "n_targets": len(tg["targets"]),
             "invested_target": sum(t["value"] for t in tg["targets"].values()),
             "notes": res["notes"],
+            "outcome": outcome,
         }
 
     # --- controllo stop (senza rifare le tabelle) -----------------------------------------------------
     def stop_check(self) -> dict:
+        self.refresh_orders()
         positions = {s: x for s, x in self._positions().items() if s in self.managed}
         atrs = self._atrs(list(positions))
         p = portfolio.Params()
-        open_stops = {
-            x["symbol"] for x in self.journal.proposals(OPEN_STATUSES) if x["kind"] == "STOP"
+        active = {
+            x["symbol"] for x in self.journal.proposals(("submitted",)) if x["kind"] == "STOP"
         }
-        run_id = "stop-" + now().strftime("%Y%m%d-%H%M%S")
+        run_id = now().strftime("%Y%m%d-%H%M%S-stop")
         new = []
         for sym, pos in positions.items():
             loss = portfolio.stop_hit(pos, atrs.get(sym), p.atr_stop_mult)
-            if loss is None or sym in open_stops:
+            if loss is None or sym in active:
                 continue
             info = self.managed[sym]
             atr = atrs[sym]
             new.append(
                 portfolio._proposal(
-                    "STOP",
-                    "sell",
-                    sym,
-                    info["name"],
-                    info["sector"],
-                    pos["qty"],
-                    pos["price"],
-                    f"Perdita {loss:.2f}$/azione ({loss / pos['avg_entry']:.1%}) > {p.atr_stop_mult:g} ATR "
-                    f"({atr:.2f}$): vendita immediata consigliata",
-                    atr=atr,
-                    loss_per_share=loss,
-                    avg_entry=pos["avg_entry"],
+                    "STOP", "sell", sym, info["name"], info["sector"], pos["qty"], pos["price"],
+                    f"Perdita {loss:.2f}$/azione ({loss / pos['avg_entry']:.1%}) > "
+                    f"{p.atr_stop_mult:g} ATR ({atr:.2f}$): vendita per stop",
+                    atr=atr, loss_per_share=loss, avg_entry=pos["avg_entry"],
                 )
-            )
+            )  # fmt: skip
         self.journal.log("STOP_CHECK", {"n_positions": len(positions), "n_new": len(new)}, run_id)
         for pr in new:
             self.journal.add_proposal(run_id, pr)
-        return {"n_positions": len(positions), "n_new": len(new)}
+        outcome = self._execute_all([pr["id"] for pr in new])
+        return {"n_positions": len(positions), "n_new": len(new), "outcome": outcome}
 
-    # --- decisioni -----------------------------------------------------------------------------------
-    def decide(self, pid: str, action: str) -> dict:
+    # --- invio degli ordini --------------------------------------------------------------------------
+    def _execute_all(self, ids: list[str]) -> dict:
+        """Invia tutte le operazioni: prima stop e vendite, poi (a vendite concluse) gli acquisti."""
+        props = [self.journal.get_proposal(i) for i in ids]
+        sells = [x["id"] for x in props if x["side"] == "sell"]
+        buys = [x["id"] for x in props if x["side"] == "buy"]
+        for pid in sells:
+            self._send(pid)
+        self._settle(sells)
+        for pid in buys:
+            self._send(pid)
+        status = [self.journal.get_proposal(i)["status"] for i in ids]
+        return {
+            "total": len(ids),
+            "filled": status.count("filled"),
+            "in_progress": status.count("submitted"),
+            "failed": status.count("failed"),
+            "void": status.count("void"),
+        }
+
+    def _settle(self, sell_ids: list[str]) -> None:
+        """Attende (al massimo `settle_seconds`) l'esito delle vendite: liberano potere d'acquisto."""
+        deadline = time.monotonic() + self.settle_seconds
+        while time.monotonic() < deadline:
+            self.refresh_orders()
+            if not any(self.journal.get_proposal(i)["status"] == "submitted" for i in sell_ids):
+                return
+            time.sleep(1)
+
+    def _send(self, pid: str, limit: bool = False) -> str:
+        """Invia l'ordine di una operazione. Non solleva eccezioni: un errore la segna come fallita."""
         pr = self.journal.get_proposal(pid)
-        if pr is None:
-            raise DeskError("proposta sconosciuta")
-        if pr["status"] not in OPEN_STATUSES:
-            raise DeskError(f"proposta già gestita (stato: {pr['status']})")
-        base = {"action": action, "symbol": pr["symbol"], "kind": pr["kind"], "side": pr["side"]}
-        if action == "reject":
-            self.journal.set_status(pid, "rejected", "DECISION", base)
-            return {"status": "rejected"}
-        if action == "snooze":
-            until = iso(now() + SNOOZE)
-            self.journal.set_status(
-                pid, "snoozed", "DECISION", {**base, "until": until}, snooze_until=until
-            )
-            return {"status": "snoozed", "snooze_until": until}
-        if action != "execute":
-            raise DeskError(f"azione sconosciuta: {action}")
-        return self._execute(pr, base)
-
-    def _execute(self, pr: dict, base: dict) -> dict:
-        pid, sym = pr["id"], pr["symbol"]
+        sym, side = pr["symbol"], pr["side"]
         try:
-            positions = self._positions()
             price = self.broker.latest_prices([sym]).get(sym) or pr["price"]
-            if pr["side"] == "sell":
-                held = positions.get(sym, {}).get("qty", 0.0)
-                qty = min(pr["qty"], held)
+            qty = pr["qty"]
+            if side == "sell":
+                held = self._positions().get(sym, {}).get("qty", 0.0)
+                qty = min(qty, held)
                 if qty <= 0:
                     self.journal.set_status(
-                        pid, "void", "DECISION", {**base, "note": "posizione non più presente"}
+                        pid, "void", "DECISION_DONE", {"note": "posizione non più presente"}
                     )
-                    raise DeskError("la posizione non è più presente: proposta annullata")
+                    return "void"
             else:
                 bp = self.broker.account()["buying_power"]
-                qty = min(pr["qty"], math.floor(bp / price))
-                if qty < 1:
-                    msg = f"potere d'acquisto insufficiente ({bp:,.0f}$) per {sym} a {price:.2f}$"
-                    self.journal.log(
-                        "ERROR",
-                        {"message": msg, "symbol": sym, "action": "execute"},
-                        pr["run_id"],
+                max_qty = math.floor(bp / price)
+                if max_qty < 1:
+                    return self._fail(
                         pid,
+                        f"potere d'acquisto insufficiente ({bp:,.0f}$) per {sym} a {price:.2f}$",
                     )
-                    raise DeskError(msg)
-            overdue = bool(pr.get("snooze_until") and pr["snooze_until"] <= iso(now()))
+                qty = min(qty, max_qty)
+            order_type = "limit" if limit else "market"
             self.journal.log(
                 "DECISION",
                 {
-                    **base,
-                    "qty": qty,
-                    "proposed_qty": pr["qty"],
-                    "price_at_decision": price,
-                    "after_snooze": overdue,
+                    "action": "auto", "symbol": sym, "kind": pr["kind"], "side": side, "qty": qty,
+                    "proposed_qty": pr["qty"], "price_at_decision": price, "order_type": order_type,
                 },
-                pr["run_id"],
-                pid,
+                pr["run_id"], pid,
+            )  # fmt: skip
+            cid = f"sl-{pid}"
+            order = (
+                self.broker.submit_limit(sym, side, qty, price, cid)
+                if limit
+                else self.broker.submit_market(sym, side, qty, cid)
             )
-            order = self.broker.submit_market(sym, pr["side"], qty, f"sl-{pid}")
-        except DeskError:
-            raise
-        except Exception as e:
-            self.journal.log(
-                "ERROR",
-                {"message": f"{type(e).__name__}: {e}", "symbol": sym, "action": "execute"},
-                pr["run_id"],
-                pid,
-            )
-            raise DeskError(f"ordine non inviato: {e}") from e
-        status = FINAL_ORDER.get(order["order_status"], "submitted")
-        self.journal.update_data(pid, order_id=order["order_id"], exec_qty=qty)
+        except Exception as e:  # noqa: BLE001 - qualsiasi errore del broker: segnala e prosegui
+            return self._fail(pid, f"{type(e).__name__}: {e}")
+        self.journal.update_data(
+            pid, order_id=order["order_id"], exec_qty=qty, order_type=order_type,
+            filled_qty=order["filled_qty"], filled_avg_price=order["filled_avg_price"],
+            shortfall=pr["qty"] - qty if qty < pr["qty"] else 0,
+        )  # fmt: skip
         self.journal.log(
-            "ORDER", {"symbol": sym, "side": pr["side"], "qty": qty, **order}, pr["run_id"], pid
-        )
+            "ORDER", {"symbol": sym, "side": side, "qty": qty, "order_type": order_type, **order},
+            pr["run_id"], pid,
+        )  # fmt: skip
+        return self._apply_order(pid, order, qty)
+
+    def _apply_order(self, pid: str, order: dict, qty: float) -> str:
+        """Traduce lo stato dell'ordine in esito dell'operazione (eseguita / in corso / fallita)."""
+        st = order["order_status"]
+        filled = order["filled_qty"] or 0.0
+        if st == "filled":
+            self.journal.set_status(
+                pid, "filled", "DECISION_DONE",
+                {"order_id": order["order_id"], "order_status": st},
+            )  # fmt: skip
+            return "filled"
+        if st in FAILED_ORDER:
+            reason = f"ordine {st}"
+            if filled > 0:
+                reason += f": eseguite {filled:g} azioni su {qty:g}"
+            return self._fail(pid, reason, remaining=max(qty - filled, 0.0))
         self.journal.set_status(
-            pid,
-            status,
-            "DECISION_DONE",
-            {"order_id": order["order_id"], "order_status": order["order_status"]},
+            pid, "submitted", "DECISION_DONE", {"order_id": order["order_id"], "order_status": st}
         )
-        warn = None
-        try:
-            if not self.broker.clock()["is_open"]:
-                warn = "Mercato chiuso: l'ordine resta in coda fino alla prossima apertura"
-        except Exception:  # noqa: BLE001 - l'avviso è solo informativo
-            warn = None
-        return {"status": status, "order": order, "qty": qty, "warning": warn}
+        return "submitted"
+
+    def _fail(self, pid: str, reason: str, remaining: float | None = None) -> str:
+        pr = self.journal.get_proposal(pid)
+        rem = pr["qty"] if remaining is None else remaining
+        self.journal.update_data(pid, error=reason, remaining_qty=rem)
+        self.journal.set_status(
+            pid, "failed", "TRADE_FAILED",
+            {"symbol": pr["symbol"], "side": pr["side"], "reason": reason, "remaining_qty": rem},
+        )  # fmt: skip
+        return "failed"
 
     def refresh_orders(self) -> int:
-        """Aggiorna le proposte con ordine inviato ma non ancora concluso."""
+        """Aggiorna le operazioni con ordine inviato ma non concluso; segnala quelle fallite."""
         n = 0
         for pr in self.journal.proposals(("submitted",)):
             oid = pr.get("order_id")
@@ -247,77 +278,70 @@ class Desk:
             try:
                 o = self.broker.get_order(oid)
             except Exception as e:  # noqa: BLE001
-                self.journal.log(
-                    "ERROR",
-                    {"message": f"{type(e).__name__}: {e}", "order_id": oid},
-                    pr["run_id"],
-                    pr["id"],
-                )
+                msg = f"{type(e).__name__}: {e}"
+                self.journal.log("ERROR", {"message": msg, "order_id": oid}, pr["run_id"], pr["id"])
                 continue
-            new = FINAL_ORDER.get(o["order_status"])
-            if new:
+            if o["order_status"] == "filled" or o["order_status"] in FAILED_ORDER:
                 self.journal.log(
                     "ORDER_UPDATE", {"symbol": pr["symbol"], **o}, pr["run_id"], pr["id"]
                 )
-                self.journal.set_status(
-                    pr["id"],
-                    new,
-                    "DECISION_DONE",
-                    {"order_id": oid, "order_status": o["order_status"]},
+                self.journal.update_data(
+                    pr["id"], filled_qty=o["filled_qty"], filled_avg_price=o["filled_avg_price"]
                 )
+                self._apply_order(pr["id"], o, pr.get("exec_qty") or pr["qty"])
                 n += 1
         return n
 
-    def open_proposals(self) -> list[dict]:
-        t = iso(now())
-        out = []
-        for pr in self.journal.proposals(OPEN_STATUSES):
-            out.append(
-                {
-                    **pr,
-                    "due": pr["status"] == "snoozed"
-                    and bool(pr["snooze_until"])
-                    and pr["snooze_until"] <= t,
-                }
+    # --- riposizionamento a prezzo attuale ---------------------------------------------------------
+    def reposition(self, pid: str) -> dict:
+        """Rimanda la quantità non eseguita di un'operazione fallita con un ordine limite al prezzo attuale."""
+        pr = self.journal.get_proposal(pid)
+        if pr is None:
+            raise DeskError("operazione sconosciuta")
+        if pr["status"] != "failed":
+            raise DeskError(
+                f"si possono riposizionare solo le operazioni fallite (stato: {pr['status']})"
             )
-        return out
+        remaining = pr.get("remaining_qty") or pr["qty"]
+        try:
+            price = self.broker.latest_prices([pr["symbol"]]).get(pr["symbol"])
+        except Exception as e:
+            raise DeskError(f"prezzo attuale non disponibile: {e}") from e
+        if not price:
+            raise DeskError(f"prezzo attuale non disponibile per {pr['symbol']}")
+        new = {k: v for k, v in pr.items() if k not in _RUNTIME}
+        new |= {
+            "id": uuid.uuid4().hex[:12],
+            "qty": remaining,
+            "price": price,
+            "value": remaining * price,
+            "parent_id": pid,
+            "reason": f"Riposizionata a prezzo attuale ({price:.2f}$, da {pid}): {pr['reason']}",
+        }
+        self.journal.add_proposal(pr["run_id"], new)
+        self.journal.set_status(
+            pid, "repositioned", "REPOSITION",
+            {"symbol": pr["symbol"], "side": pr["side"], "qty": remaining, "limit_price": price,
+             "new_id": new["id"]},
+        )  # fmt: skip
+        status = self._send(new["id"], limit=True)
+        return {"status": status, "new_id": new["id"], "limit_price": price, "qty": remaining}
+
+    def trades(self) -> list[dict]:
+        return self.journal.trades()
 
 
 def _slim_sector(r: dict) -> dict:
     keys = (
-        "symbol",
-        "name",
-        "price",
-        "trend_label",
-        "ret_1m",
-        "ret_3m",
-        "ret_6m",
-        "ret_12m",
-        "rsi14",
-        "rs_3m",
-        "vol_ratio_20_90",
-        "updown_volume",
-        "vol_60d",
-        "atr_pct",
-        "drawdown_52w",
-        "scores",
-    )
+        "symbol", "name", "price", "trend_label", "ret_1m", "ret_3m", "ret_6m", "ret_12m", "rsi14",
+        "rs_3m", "vol_ratio_20_90", "updown_volume", "vol_60d", "atr_pct", "drawdown_52w", "scores",
+    )  # fmt: skip
     return {k: r.get(k) for k in keys}
 
 
 def _slim_stock(r: dict) -> dict:
     keys = (
-        "rank",
-        "symbol",
-        "name",
-        "price",
-        "trend_label",
-        "twrr_w",
-        "twrr_3m",
-        "beta_1y",
-        "te_60d",
-        "rel_drawdown",
-        "scores",
-        "strategy_weight",
-    )
+        "rank", "symbol", "name", "price", "trend_label", "twrr_w", "twrr_3m", "beta_1y",
+        "te_60d", "rel_drawdown", "scores", "strategy_weight",
+    )  # fmt: skip
     return {k: r.get(k) for k in keys}

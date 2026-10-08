@@ -35,7 +35,8 @@ CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
 BEGIN SELECT RAISE(ABORT, 'journal append-only'); END;
 """
 
-OPEN_STATUSES = ("pending", "snoozed")
+# stati "attivi": ordine in corso oppure fallito e ancora da gestire
+ACTIVE_STATUSES = ("submitted", "failed")
 
 
 def now() -> datetime:
@@ -145,12 +146,28 @@ class Journal:
                 "UPDATE proposals SET data = ? WHERE id = ?", (json.dumps(d, default=str), pid)
             )
 
-    def supersede_open(self, run_id: str) -> int:
-        """Una nuova esecuzione sostituisce le proposte ancora aperte delle esecuzioni precedenti."""
-        old = [p for p in self.proposals(OPEN_STATUSES) if p["run_id"] != run_id]
+    def supersede_failed(self, run_id: str) -> int:
+        """Una nuova esecuzione ricalcola tutto dalle posizioni: i fallimenti vecchi non servono più."""
+        old = [p for p in self.proposals(("failed",)) if p["run_id"] != run_id]
         for p in old:
             self.set_status(p["id"], "superseded", "SUPERSEDED", {"by_run": run_id})
         return len(old)
+
+    def latest_run_id(self) -> str | None:
+        with self._lock:
+            r = self._db.execute(
+                "SELECT run_id FROM events WHERE kind = 'RUN' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return r["run_id"] if r else None
+
+    def trades(self) -> list[dict]:
+        """Operazioni dell'ultima esecuzione (e controlli stop successivi) più tutto ciò che è attivo."""
+        last = self.latest_run_id()
+        return [
+            p
+            for p in self.proposals()
+            if p["status"] in ACTIVE_STATUSES or last is None or p["run_id"] >= last
+        ]
 
     @staticmethod
     def _row(r: sqlite3.Row) -> dict:
@@ -172,9 +189,13 @@ def summarize(kind: str, p: dict) -> str:
             f"{p.get('n_proposals', 0)} proposte, capitale {p.get('params', {}).get('capital', 0):,.0f}$"
         )
     if kind == "PROPOSAL":
-        return f"{p['kind']} {p['qty']:g} {p['symbol']} @ {p['price']:.2f}$ ({p['value']:,.0f}$) - {p['reason']}"
+        return f"Operazione {p['kind']} {p['qty']:g} {p['symbol']} @ {p['price']:.2f}$ ({p['value']:,.0f}$) - {p['reason']}"
     if kind == "DECISION":
-        return f"Decisione: {p.get('action')} - {p.get('symbol', '')}"
+        return f"Invio automatico: {p.get('side', '')} {p.get('qty')} {p.get('symbol', '')} @ ~{p.get('price_at_decision', 0):.2f}$"
+    if kind == "TRADE_FAILED":
+        return f"OPERAZIONE FALLITA {p.get('symbol', '')}: {p.get('reason')}"
+    if kind == "REPOSITION":
+        return f"Riposizionata a prezzo attuale: {p.get('symbol')} {p.get('side')} {p.get('qty')} @ {p.get('limit_price')}"
     if kind == "ORDER":
         return (
             f"Ordine {p.get('side')} {p.get('qty'):g} {p.get('symbol')} inviato "
@@ -187,7 +208,7 @@ def summarize(kind: str, p: dict) -> str:
     if kind == "STOP_CHECK":
         return f"Controllo stop ATR: {p.get('n_new', 0)} nuove proposte su {p.get('n_positions', 0)} posizioni"
     if kind == "SUPERSEDED":
-        return f"Proposta sostituita dalla nuova esecuzione {p.get('by_run')}"
+        return f"Operazione fallita archiviata dalla nuova esecuzione {p.get('by_run')}"
     if kind == "ERROR":
         return f"ERRORE: {p.get('message')}"
     return f"{kind}: {p.get('status', '')}"

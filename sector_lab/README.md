@@ -50,10 +50,17 @@ rispetto al mercato. Anche questa lista si scarica in Excel (colonne Beta e Peso
 
 Il pulsante **Avvia ribilanciamento giornaliero** rigenera le tabelle (settori e aziende, in
 modalità qualità o alto beta), calcola l'allocazione obiettivo su un capitale di 1.000.000$ e
-propone gli acquisti e le vendite per raggiungerla. Per **ogni proposta** scegli:
-**Esegui ora** (ordine a mercato sul conto **paper**, con conferma), **Rifiuta** o **Rimanda 1 h**
-(allo scadere la proposta è evidenziata da rivalutare; all'esecuzione quantità e prezzo sono
-ricontrollati). Nessun ordine parte da solo.
+**invia da solo gli ordini** al conto **paper**: prima stop e vendite (si attende l'esito, fino a
+15 s), poi gli acquisti, tutti a mercato. Non c'è approvazione per singola operazione: il pulsante
+è l'unico passaggio umano. Se ci sono ordini ancora in corso il nuovo ribilanciamento non parte,
+per non duplicarli.
+
+**Operazioni non andate a buon fine** (ordine rifiutato, annullato, scaduto, eseguito solo in parte,
+potere d'acquisto insufficiente, errore del broker): compaiono in un avviso rosso in cima alla
+scheda con il motivo e la quantità non eseguita, e sono registrate nel Journal (evento FALLITA).
+Il pulsante **Riposiziona a prezzo attuale** rimanda la quantità non eseguita con un ordine limite
+al prezzo corrente. Un nuovo ribilanciamento archivia i fallimenti precedenti, perché ricalcola
+tutto dalle posizioni reali.
 
 Regole dell'algoritmo (`portfolio.py`, parametri in `Params`):
 

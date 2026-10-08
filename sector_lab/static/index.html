@@ -30,6 +30,8 @@ tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:color-mix(in srgb
 .btn:disabled{opacity:.5;cursor:wait}
 .k{display:inline-block;padding:1px 8px;border-radius:10px;font-weight:700;font-size:12px;color:#fff}
 .k.STOP{background:#c0392b}.k.SELL{background:#d9822b}.k.BUY{background:#12805c}
+tr.bad{background:color-mix(in srgb,#c0392b 14%,transparent)!important}
+.st{font-weight:600}.st.ok{color:var(--up)}.st.bad{color:var(--down)}.st.wait{color:#d9822b}.st.mute{color:var(--mute)}
 tr.due{background:color-mix(in srgb,#d9822b 18%,transparent)!important}
 .acts button{margin-right:4px;padding:3px 9px}
 .up{color:var(--up)}.down{color:var(--down)}
@@ -81,21 +83,21 @@ svg{width:100%;height:auto;display:block}
       <p class="note" id="a-beta-note" hidden><b>Strategia alto beta:</b> si considerano solo i titoli con trend relativo non ribassista e TWRR ponderato positivo (che stanno battendo ACWI); tra questi si scelgono i 10 con beta a 1 anno più alto e si pesano in proporzione al beta (tetto 25% per titolo). Un beta alto amplifica guadagni e perdite rispetto al mercato.</p></div>
   </section>
   <section id="v-r" hidden>
+    <div class="card err" id="r-alert" hidden></div>
     <div class="card" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
       <label>Modalità <select id="r-mode"><option value="quality">Qualità (prudente)</option><option value="beta">Alto beta</option></select></label>
       <label>Capitale $ <input id="r-cap" type="number" value="1000000" step="10000" min="10000" style="width:120px"></label>
-      <button class="btn primary" id="r-run">Avvia ribilanciamento giornaliero</button>
-      <button class="btn" id="r-stops">Controlla stop ATR</button>
+      <button class="btn primary" id="r-run">Avvia ribilanciamento giornaliero (invia gli ordini)</button>
+      <button class="btn" id="r-stops">Controlla stop ATR (vende)</button>
       <span class="badge" id="r-market"></span>
     </div>
     <div class="card" id="r-summary" hidden></div>
-    <div class="card wrap"><h3 style="margin-top:0">Proposte da decidere</h3><table id="r-tbl" style="min-width:900px"></table>
-      <p class="note">Nessun ordine parte da solo: per ogni proposta scegli <b>Esegui ora</b> (ordine a mercato sul conto paper), <b>Rifiuta</b> o <b>Rimanda 1 h</b>.
-      Le proposte STOP (perdita &gt; 1 ATR) sono in cima. Ogni passaggio è registrato nel Journal. Le regole non garantiscono l'assenza di perdite: riducono il rischio, non lo eliminano.</p></div>
+    <div class="card wrap"><h3 style="margin-top:0">Operazioni</h3><table id="r-tbl" style="min-width:900px"></table>
+      <p class="note"><b>Invio automatico:</b> premendo il pulsante, le operazioni vengono inviate da sole al conto paper (prima le vendite, poi gli acquisti, a mercato). Non c'è approvazione per singola operazione. Le operazioni <b>non andate a buon fine</b> (ordine rifiutato, annullato, scaduto, eseguito in parte o errore del broker) sono evidenziate in rosso e si possono rimandare con <b>Riposiziona a prezzo attuale</b> (ordine limite al prezzo corrente). Ogni passaggio è registrato nel Journal. Le regole non garantiscono l'assenza di perdite: riducono il rischio, non lo eliminano.</p></div>
   </section>
   <section id="v-j" hidden>
     <div class="card" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
-      <label>Evento <select id="j-kind"><option value="">Tutti</option><option>RUN</option><option>PROPOSAL</option><option>DECISION</option><option>ORDER</option><option>ORDER_UPDATE</option><option>STOP_CHECK</option><option>ERROR</option></select></label>
+      <label>Evento <select id="j-kind"><option value="">Tutti</option><option>RUN</option><option>PROPOSAL</option><option>DECISION</option><option>TRADE_FAILED</option><option>REPOSITION</option><option>ORDER</option><option>ORDER_UPDATE</option><option>STOP_CHECK</option><option>ERROR</option></select></label>
       <button class="btn" id="j-refresh">Aggiorna</button>
       <a class="btn" href="/api/journal.xlsx" download style="text-decoration:none">Scarica Journal (Excel)</a>
     </div>
@@ -234,39 +236,38 @@ const SGROUPS=[['',3],['Trend (vs ACWI)',3],['Momentum (TWRR vs ACWI)',6],['Volu
 const POSTH={'Content-Type':'application/json','X-Sector-Lab':'1'};
 async function post(u,b){const r=await fetch(u,{method:'POST',headers:POSTH,body:JSON.stringify(b||{})});const j=await r.json();if(!r.ok)throw new Error(j.error||r.statusText);return j}
 const hhmm=iso=>new Date(iso).toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'});
-const STATUS={pending:'Da decidere',snoozed:'Rimandata'};
 function msg(t,ok){$('#msg').innerHTML=`<div class="${ok?'warn':'err'}">${t}</div>`}
 let rTimer=null;
-function renderProposals(d){
+const ESITO={filled:['Eseguita','ok'],submitted:['In corso / in coda','wait'],failed:['NON ANDATA A BUON FINE','bad'],repositioned:['Riposizionata','mute'],void:['Annullata (posizione assente)','mute'],superseded:['Archiviata','mute']};
+function renderTrades(d){
   $('#r-market').textContent=(d.broker==='demo'?'DEMO · ':'Alpaca paper · ')+(d.market.is_open?'mercato aperto':'mercato chiuso (gli ordini restano in coda fino all\'apertura)');
-  const rows=d.proposals;
-  $('#r-tbl').innerHTML='<thead><tr><th>Tipo</th><th>Titolo</th><th>Qtà</th><th>Prezzo</th><th>Valore</th><th style="text-align:left">Motivo</th><th>Stato</th><th>Azione</th></tr></thead><tbody>'
+  document.title=(d.n_failed?`(${d.n_failed} fallite) `:'')+'Sector Lab';
+  $('#r-alert').hidden=!d.n_failed;
+  $('#r-alert').innerHTML=d.n_failed?`<b>${d.n_failed} operazion${d.n_failed===1?'e non è andata':'i non sono andate'} a buon fine.</b> Controlla il motivo nella tabella e usa <b>Riposiziona a prezzo attuale</b> per rimandare la quantità non eseguita.`:'';
+  const rows=[...d.trades].sort((a,b)=>(b.status==='failed')-(a.status==='failed'));
+  $('#r-tbl').innerHTML='<thead><tr><th>Tipo</th><th>Titolo</th><th>Qtà</th><th>Eseguite</th><th>Prezzo</th><th>Valore</th><th style="text-align:left">Motivo / esito</th><th>Stato</th><th>Azione</th></tr></thead><tbody>'
    +(rows.length?rows.map(p=>{
-     const st=p.status==='snoozed'?(p.due?'<b>Rimandata: da rivalutare ora</b>':`Rimandata fino alle ${hhmm(p.snooze_until)}`):STATUS[p.status];
-     return `<tr class="${p.due?'due':''}" style="cursor:default"><td><span class="k ${p.kind}">${p.kind==='STOP'?'STOP':p.side==='sell'?'VENDI':'COMPRA'}</span></td>
-     <td><b>${p.symbol}</b> <span class="badge">${p.name} · ${p.sector}</span></td><td>${p.qty}</td><td>${num(p.price)}</td><td>${money(p.value)}</td>
-     <td style="text-align:left;white-space:normal;max-width:380px">${p.reason}</td><td>${st}</td>
-     <td class="acts"><button class="btn primary" data-id="${p.id}" data-a="execute">Esegui ora</button><button class="btn" data-id="${p.id}" data-a="reject">Rifiuta</button><button class="btn" data-id="${p.id}" data-a="snooze">Rimanda 1 h</button></td></tr>`}).join('')
-   :'<tr><td colspan="8" style="text-align:center;color:var(--mute)">Nessuna proposta aperta. Avvia il ribilanciamento giornaliero.</td></tr>')+'</tbody>';
-  $('#r-tbl').querySelectorAll('button[data-id]').forEach(b=>b.onclick=()=>decide(b.dataset.id,b.dataset.a,rows.find(x=>x.id===b.dataset.id)));
+     const [lab,cl]=ESITO[p.status]||[p.status,'mute'];
+     const det=p.status==='failed'?`<br><b class="down">${p.error||''}</b>${p.remaining_qty!=null?` · non eseguite: ${p.remaining_qty}`:''}`:(p.shortfall?`<br><span class="down">ridotta di ${p.shortfall} azioni (potere d'acquisto)</span>`:'');
+     const ex=p.filled_qty==null?'–':`${p.filled_qty}${p.filled_avg_price?` @ ${num(p.filled_avg_price)}`:''}`;
+     return `<tr class="${p.status==='failed'?'bad':''}" style="cursor:default"><td><span class="k ${p.kind}">${p.kind==='STOP'?'STOP':p.side==='sell'?'VENDI':'COMPRA'}</span>${p.order_type==='limit'?' <span class="badge">limite</span>':''}</td>
+     <td><b>${p.symbol}</b> <span class="badge">${p.name} · ${p.sector}</span></td><td>${p.qty}</td><td>${ex}</td><td>${num(p.price)}</td><td>${money(p.value)}</td>
+     <td style="text-align:left;white-space:normal;max-width:420px">${p.reason}${det}</td><td><span class="st ${cl}">${lab}</span></td>
+     <td class="acts">${p.status==='failed'?`<button class="btn primary" data-id="${p.id}">Riposiziona a prezzo attuale</button>`:''}</td></tr>`}).join('')
+   :'<tr><td colspan="9" style="text-align:center;color:var(--mute)">Nessuna operazione. Avvia il ribilanciamento giornaliero.</td></tr>')+'</tbody>';
+  $('#r-tbl').querySelectorAll('button[data-id]').forEach(b=>b.onclick=()=>reposition(b.dataset.id,rows.find(x=>x.id===b.dataset.id)));
 }
-async function loadProposals(){try{renderProposals(await api('/api/rebalance/proposals'))}catch(e){err(e)}}
-async function decide(id,action,p){
-  if(action==='execute'){
-    const what=`${p.side==='sell'?'VENDERE':'COMPRARE'} ${p.qty} ${p.symbol} a mercato (~${money(p.value)}) sul conto PAPER?\n\n${p.reason}`;
-    if(!confirm(what))return;
-  }
+async function loadTrades(){try{renderTrades(await api('/api/rebalance/proposals'))}catch(e){err(e)}}
+async function reposition(id,p){
   document.querySelectorAll('#r-tbl button').forEach(b=>b.disabled=true);
   try{
-    const r=await post('/api/proposal/decide',{id,action});
-    if(action==='execute')msg(`Ordine inviato: ${r.order.order_status} (${r.qty} ${p.symbol}).`+(r.warning?' '+r.warning:''),true);
-    else if(action==='snooze')msg(`Proposta su ${p.symbol} rimandata di 1 ora.`,true);
-    else msg(`Proposta su ${p.symbol} rifiutata.`,true);
+    const r=await post('/api/trade/reposition',{id});
+    msg(r.status==='failed'?`Riposizionamento di ${p.symbol} NON riuscito: vedi la tabella.`:`${p.symbol}: ordine limite a ${r.limit_price.toFixed(2)}$ inviato (${r.qty} azioni, stato ${r.status}).`,r.status!=='failed');
   }catch(e){err(e)}
-  loadProposals();
+  loadTrades();
 }
 async function runRebalance(){
-  const btn=$('#r-run');btn.disabled=true;$('#r-stops').disabled=true;btn.textContent='Calcolo in corso… (scarico le tabelle)';
+  const btn=$('#r-run');btn.disabled=true;$('#r-stops').disabled=true;btn.textContent='Calcolo e invio ordini in corso…';
   try{
     const r=await post('/api/rebalance/run',{mode:$('#r-mode').value,capital:+$('#r-cap').value});
     const sb=r.sector_budgets;
@@ -275,17 +276,17 @@ async function runRebalance(){
      +'<div class="wrap"><table style="min-width:600px;margin-top:8px"><thead><tr><th>Settore</th><th>Trend ETF</th><th>Score</th><th>Budget</th><th style="text-align:left">Note</th></tr></thead><tbody>'
      +sb.map(x=>`<tr style="cursor:default"><td><b>${x.name}</b> <span class="badge">${x.symbol}</span></td><td>${x.trend_label}</td><td>${x.score==null?'–':Math.round(x.score)}</td><td>${x.eligible?money(x.budget):'–'}</td><td style="text-align:left">${x.eligible?'':'escluso: '+x.reason}</td></tr>`).join('')+'</tbody></table></div>'
      +(r.notes.length?'<p class="note">'+r.notes.join('<br>')+'</p>':'');
-    msg('Ribilanciamento calcolato e registrato nel Journal.',true);
+    {const o=r.outcome;msg(`Ribilanciamento eseguito: ${o.total} operazioni inviate · ${o.filled} eseguite · ${o.in_progress} in corso · ${o.failed} fallite.`,o.failed===0)}
   }catch(e){err(e)}
-  btn.disabled=false;$('#r-stops').disabled=false;btn.textContent='Avvia ribilanciamento giornaliero';
-  loadProposals();
+  btn.disabled=false;$('#r-stops').disabled=false;btn.textContent='Avvia ribilanciamento giornaliero (invia gli ordini)';
+  loadTrades();
 }
 async function checkStops(){
   $('#r-stops').disabled=true;
-  try{const r=await post('/api/rebalance/stops');msg(`Controllo stop: ${r.n_new} nuove proposte su ${r.n_positions} posizioni.`,true)}catch(e){err(e)}
-  $('#r-stops').disabled=false;loadProposals();
+  try{const r=await post('/api/rebalance/stops');{const o=r.outcome;msg(`Controllo stop: ${r.n_new} vendite per stop su ${r.n_positions} posizioni (${o.filled} eseguite, ${o.failed} fallite).`,o.failed===0)}}catch(e){err(e)}
+  $('#r-stops').disabled=false;loadTrades();
 }
-const KIND_LABEL={RUN:'Ribilanciamento',PROPOSAL:'Proposta',DECISION:'Decisione',DECISION_DONE:'Esito',ORDER:'Ordine',ORDER_UPDATE:'Ordine aggiornato',STOP_CHECK:'Controllo stop',SUPERSEDED:'Sostituita',ERROR:'Errore'};
+const KIND_LABEL={RUN:'Ribilanciamento',PROPOSAL:'Proposta',DECISION:'Invio',DECISION_DONE:'Esito',TRADE_FAILED:'FALLITA',REPOSITION:'Riposizionata',ORDER:'Ordine',ORDER_UPDATE:'Ordine aggiornato',STOP_CHECK:'Controllo stop',SUPERSEDED:'Sostituita',ERROR:'Errore'};
 async function loadJournal(){
   try{
     const d=await api('/api/journal?limit=300'+($('#j-kind').value?'&kind='+$('#j-kind').value:''));
@@ -316,7 +317,7 @@ async function loadStocks(refresh){
 function showTab(t){
   for(const k of ['s','a','r','j','p']){$('#v-'+k).hidden=k!==t;$('#t-'+k).classList.toggle('on',k===t)}
   clearInterval(rTimer);
-  if(t==='r'){loadProposals();rTimer=setInterval(loadProposals,30000)}
+  if(t==='r'){loadTrades();rTimer=setInterval(loadTrades,30000)}
   if(t==='j')loadJournal();
   if(t==='p')loadAcct();
   if(t==='a'){
