@@ -67,7 +67,11 @@ Regole dell'algoritmo (`portfolio.py`, parametri in `Params`):
 1. settori idonei: ETF non ribassista e punteggio totale >= 50; peso in proporzione al punteggio,
    **senza tetto per settore** (anche solo 2 settori vanno bene);
 2. titoli: solo la top 10 del settore con trend relativo non ribassista e TWRR > 0; pesi in
-   proporzione al punteggio (o al beta in modalità alto beta); **massimo 10% del capitale per titolo** (l'eccedenza passa agli altri; se i titoli sono pochi resta liquidità);
+   proporzione al punteggio (o al beta in modalità alto beta); **massimo 10% del capitale per titolo** (l'eccedenza passa agli altri);
+   il **97% è sempre investito**: se i titoli idonei non bastano (servono almeno 10 titoli), si aggiungono
+   prima altri settori non ribassisti, poi settori ribassisti, infine titoli della top 10 che non superano
+   i filtri; ogni aggiunta è segnalata nelle note del ribilanciamento e nel Journal. Resta più liquidità
+   solo se in assoluto non esistono abbastanza titoli;
 3. liquidità minima 3%; gli acquisti si riducono se manca liquidità;
 4. **stop**: perdita per azione > 1 ATR(14) -> vendita completa proposta con priorità massima
    (pulsante "Controlla stop ATR" per verificarlo durante la giornata senza rifare le tabelle);

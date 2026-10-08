@@ -286,7 +286,7 @@ async function runRebalance(){
     $('#r-summary').hidden=false;
     $('#r-summary').innerHTML=`<b>Esecuzione ${r.run_id}</b> · modalità ${r.params.mode} · capitale ${money(r.params.capital)} · conto ${money(r.account.equity)} (liquidità ${money(r.account.cash)}) · target investito ${money(r.invested_target)} in ${r.n_targets} titoli`
      +'<div class="wrap"><table style="min-width:600px;margin-top:8px"><thead><tr><th>Settore</th><th>Trend ETF</th><th>Score</th><th>Budget</th><th style="text-align:left">Note</th></tr></thead><tbody>'
-     +sb.map(x=>`<tr style="cursor:default"><td><b>${x.name}</b> <span class="badge">${x.symbol}</span></td><td>${x.trend_label}</td><td>${x.score==null?'–':Math.round(x.score)}</td><td>${x.eligible?money(x.budget):'–'}</td><td style="text-align:left">${x.eligible?'':'escluso: '+x.reason}</td></tr>`).join('')+'</tbody></table></div>'
+     +sb.map(x=>`<tr style="cursor:default"><td><b>${x.name}</b> <span class="badge">${x.symbol}</span></td><td>${x.trend_label}</td><td>${x.score==null?'–':Math.round(x.score)}</td><td>${x.budget>0?money(x.budget):'–'}</td><td style="text-align:left">${x.eligible?'':(x.budget>0?'aggiunto per investire il 97%: '+(x.fallback||''):'escluso: '+x.reason)}</td></tr>`).join('')+'</tbody></table></div>'
      +(r.notes.length?'<p class="note">'+r.notes.join('<br>')+'</p>':'');
     {const o=r.outcome;msg(`Ribilanciamento eseguito: ${o.total} operazioni inviate · ${o.filled} eseguite · ${o.in_progress} in corso · ${o.failed} fallite.`,o.failed===0)}
   }catch(e){err(e)}

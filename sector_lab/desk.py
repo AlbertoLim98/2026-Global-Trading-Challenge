@@ -91,6 +91,7 @@ class Desk:
         res = portfolio.build_proposals(
             tg["targets"], positions, prices, atrs, self.managed, acct["cash"], p
         )
+        res["notes"] = [*tg["notes"], *res["notes"]]
         if acct["equity"] < capital * 0.99:
             res["notes"].append(
                 f"Il conto ha {acct['equity']:,.0f}$ di patrimonio, meno del capitale previsto "

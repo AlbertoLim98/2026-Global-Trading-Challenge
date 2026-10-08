@@ -97,6 +97,20 @@ def sector_budgets(sector_rows: list[dict], p: Params) -> list[dict]:
     return sorted(out, key=lambda s: -(s["score"] or 0))
 
 
+def _stock_raw(top: list[dict], p: Params, relaxed: bool) -> dict[str, tuple[float, dict]]:
+    """Titoli candidati di un settore con il loro peso interno (solo idonei, o tutta la top 10 se `relaxed`)."""
+    rows = top if relaxed else [r for r in top if stocks.is_eligible(r)]
+    out = {}
+    for r in rows:
+        if p.mode == "beta":
+            w = r.get("strategy_weight") or max(r.get("beta_1y") or 0.0, 0.01)
+        else:
+            w = r["scores"]["total"] or 0
+        if w > 0:
+            out[r["symbol"]] = (w, r)
+    return out
+
+
 def build_targets(
     sector_rows: list[dict],
     stocks_by_etf: dict[str, dict],
@@ -104,30 +118,77 @@ def build_targets(
 ) -> dict:
     """Allocazione obiettivo: titoli con valore in dollari e budget risultante per settore.
 
-    Nessun tetto per settore (anche due soli settori vanno bene): l'unico limite è `max_stock` del
-    capitale per titolo. Il peso di un titolo è (peso del settore) x (sua quota dentro il settore);
-    l'eccedenza dei titoli al tetto passa agli altri, in tutti i settori.
+    Nessun tetto per settore: l'unico limite è `max_stock` del capitale per titolo. Il peso di un
+    titolo è (peso del settore) x (sua quota dentro il settore); l'eccedenza dei titoli al tetto passa
+    agli altri, in tutti i settori.
+
+    La quota investita è sempre `1 - cash_reserve` (97%): se i titoli idonei non bastano a
+    raggiungerla con il tetto per titolo, si estende la selezione, in quest'ordine:
+      1. altri settori non ribassisti (per punteggio decrescente), con i loro titoli idonei;
+      2. settori ribassisti, con i loro titoli idonei;
+      3. titoli della top 10 che non superano i filtri, a partire dai settori meglio classificati.
+    I settori e i titoli aggiunti così sono segnalati (`fallback`) e annotati in `notes`.
+    Solo se non esistono abbastanza titoli in assoluto resta liquidità in più.
     """
     sectors = sector_budgets(sector_rows, p)
     invest = p.capital * (1 - p.cash_reserve)
+    cap_value = p.max_stock * p.capital
     raw_all: dict[str, float] = {}
     info: dict[str, dict] = {}
+    notes: list[str] = []
+    by_sym = {s["symbol"]: s for s in sectors}
+
+    def add(sector: dict, relaxed: bool, tier: str) -> int:
+        top = (stocks_by_etf.get(sector["symbol"]) or {}).get("top", [])
+        inner = {k: v for k, v in _stock_raw(top, p, relaxed).items() if k not in raw_all}
+        if (
+            relaxed
+        ):  # filtri allentati: solo i titoli strettamente necessari, i migliori per punteggio
+            missing = math.ceil(invest / cap_value - 1e-9) - len(raw_all)
+            best = sorted(inner, key=lambda k: -inner[k][0])[: max(missing, 0)]
+            inner = {k: inner[k] for k in best}
+        tot = sum(w for w, _ in inner.values())
+        weight = sector["raw_weight"] or 5.0  # settori aggiunti: pesano meno di quelli idonei
+        for sym, (w, r) in inner.items():
+            raw_all[sym] = weight * w / tot
+            info[sym] = {"row": r, "sector": sector["symbol"], "tier": tier}
+        sector["n_candidates"] = sector.get("n_candidates", 0) + len(inner)
+        return len(inner)
+
+    def short() -> bool:
+        return len(raw_all) * cap_value < invest - 1e-6
+
     for s in sectors:
-        if not s["eligible"]:
-            continue
-        top = (stocks_by_etf.get(s["symbol"]) or {}).get("top", [])
-        cand = [r for r in top if stocks.is_eligible(r)]
-        if p.mode == "beta":
-            inner = {r["symbol"]: r.get("strategy_weight") or max(r["beta_1y"], 0.01) for r in cand}
-        else:
-            inner = {r["symbol"]: r["scores"]["total"] or 0 for r in cand}
-        tot = sum(inner.values())
-        s["n_candidates"] = len(cand)
-        for r in cand:
-            if tot > 0 and inner[r["symbol"]] > 0:
-                raw_all[r["symbol"]] = s["raw_weight"] * inner[r["symbol"]] / tot
-                info[r["symbol"]] = {"row": r, "sector": s["symbol"]}
-    alloc = allocate(raw_all, invest, p.max_stock * p.capital)
+        if s["eligible"]:
+            add(s, False, "base")
+    extra: list[str] = []
+    for tier, pick in (
+        (
+            "settore aggiunto (non idoneo)",
+            lambda s: not s["eligible"] and s["trend_label"] != "Ribassista",
+        ),
+        ("settore ribassista aggiunto", lambda s: s["trend_label"] == "Ribassista"),
+    ):
+        for s in sectors:
+            if short() and pick(s) and add(s, False, tier):
+                s["fallback"] = tier
+                extra.append(f"{s['name']} ({tier})")
+    if short():
+        for s in sectors:  # filtri allentati: anche titoli della top 10 non idonei
+            if short() and add(s, True, "titoli non idonei aggiunti"):
+                s["fallback"] = s.get("fallback") or "titoli non idonei aggiunti"
+                extra.append(f"{s['name']} (titoli non idonei)")
+    if extra:
+        notes.append(
+            f"Per investire il {1 - p.cash_reserve:.0%} con al massimo {p.max_stock:.0%} per titolo "
+            "sono stati aggiunti: " + ", ".join(extra)
+        )
+    alloc = allocate(raw_all, invest, cap_value)
+    if sum(alloc.values()) < invest - 1.0:
+        notes.append(
+            f"Non ci sono abbastanza titoli per investire il {1 - p.cash_reserve:.0%} con il tetto "
+            f"del {p.max_stock:.0%}: investiti {sum(alloc.values()):,.0f}$ su {invest:,.0f}$"
+        )
     targets: dict[str, dict] = {}
     for sym, v in alloc.items():
         r = info[sym]["row"]
@@ -139,10 +200,11 @@ def build_targets(
             "price": r["price"],
             "score": r["scores"]["total"],
             "beta": r.get("beta_1y"),
+            "tier": info[sym]["tier"],
         }
-    for s in sectors:
+    for s in by_sym.values():
         s["budget"] = sum(t["value"] for t in targets.values() if t["sector"] == s["symbol"])
-    return {"sectors": sectors, "targets": targets}
+    return {"sectors": sectors, "targets": targets, "notes": notes}
 
 
 def _proposal(

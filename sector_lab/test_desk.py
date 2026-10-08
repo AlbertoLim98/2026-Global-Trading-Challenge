@@ -89,12 +89,59 @@ def test_two_sectors_only_every_stock_capped_at_10_percent_of_portfolio():
     assert by["XLK"]["budget"] > by["XLF"]["budget"] > 0 and by["XLE"]["budget"] == 0
 
 
-def test_too_few_titles_leave_cash_instead_of_breaking_the_cap():
+def test_always_invests_97_percent_by_adding_more_sectors():
+    # un solo settore idoneo con 4 titoli (max 40%): servono altri settori per arrivare al 97%
+    secs = [
+        _sector("XLK", "Rialzista", 90),
+        _sector("XLF", "Misto", 40),  # sotto soglia punteggio
+        _sector("XLE", "Misto", 35),
+        _sector("XLV", "Ribassista", 80),
+    ]
+    top = {
+        "XLK": {"top": [_stock(f"K{i}", 90 - i) for i in range(4)]},
+        "XLF": {"top": [_stock(f"F{i}", 60 - i) for i in range(4)]},
+        "XLE": {"top": [_stock(f"E{i}", 50 - i) for i in range(4)]},
+        "XLV": {"top": [_stock(f"V{i}", 70 - i) for i in range(4)]},
+    }
+    t = portfolio.build_targets(secs, top, P)
+    vals = [x["value"] for x in t["targets"].values()]
+    assert sum(vals) == pytest.approx(P.capital * 0.97) and max(vals) <= 0.10 * P.capital + 1e-6
+    by = {x["symbol"]: x for x in t["sectors"]}
+    assert by["XLK"]["budget"] == pytest.approx(0.40 * P.capital)  # il settore idoneo è al massimo
+    assert by["XLF"]["budget"] > 0 and by["XLE"]["budget"] > 0  # aggiunti (non ribassisti) prima...
+    assert by["XLV"]["budget"] == 0  # ...del settore ribassista, non necessario
+    assert any("sono stati aggiunti" in n for n in t["notes"])
+
+
+def test_bearish_sector_used_only_when_still_short():
+    secs = [_sector("XLK", "Rialzista", 90), _sector("XLV", "Ribassista", 80)]
+    top = {
+        "XLK": {"top": [_stock(f"K{i}", 90 - i) for i in range(6)]},
+        "XLV": {"top": [_stock(f"V{i}", 70 - i) for i in range(6)]},
+    }
+    t = portfolio.build_targets(secs, top, P)
+    assert sum(x["value"] for x in t["targets"].values()) == pytest.approx(P.capital * 0.97)
+    assert {x["sector"] for x in t["targets"].values()} == {"XLK", "XLV"}
+    assert "ribassista" in " ".join(t["notes"])
+
+
+def test_relaxed_filters_as_last_resort_to_reach_97_percent():
+    secs = [_sector("XLK", "Rialzista", 90)]
+    stocks_ = [_stock(f"K{i}", 90 - i) for i in range(5)]
+    stocks_ += [_stock(f"W{i}", 40 - i, trend="Ribassista") for i in range(6)]  # non idonei
+    t = portfolio.build_targets(secs, {"XLK": {"top": stocks_}}, P)
+    assert sum(x["value"] for x in t["targets"].values()) == pytest.approx(P.capital * 0.97)
+    assert max(x["value"] for x in t["targets"].values()) <= 0.10 * P.capital + 1e-6
+    assert len(t["targets"]) == 10 and any(k.startswith("W") for k in t["targets"])
+
+
+def test_cash_exceeds_3_percent_only_when_titles_do_not_exist_at_all():
     secs = [_sector("XLK", "Rialzista", 90)]
     top = {"XLK": {"top": [_stock(f"K{i}", 80) for i in range(3)]}}
     t = portfolio.build_targets(secs, top, P)
     assert all(x["value"] == pytest.approx(0.10 * P.capital) for x in t["targets"].values())
     assert sum(x["value"] for x in t["targets"].values()) == pytest.approx(0.30 * P.capital)
+    assert any("Non ci sono abbastanza titoli" in n for n in t["notes"])
 
 
 def test_proposals_stop_exit_buy_and_unmanaged():
