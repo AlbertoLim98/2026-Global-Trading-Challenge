@@ -231,3 +231,34 @@ def build_stocks(
     )
     _notes_sheet(wb, title, [*lines, "", *(BETA_NOTES if mode == "beta" else []), *STOCK_NOTES])
     return _save(wb)
+
+
+def build_journal(events: list[dict]) -> bytes:
+    """Journal completo (dal più vecchio al più recente) con il dettaglio JSON di ogni evento."""
+    import json
+
+    from journal import summarize
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Journal"
+    cols: list[Col] = [
+        ("", "N.", lambda e: e["id"], "0"),
+        ("", "Data/ora (UTC)", lambda e: e["ts"], None),
+        ("", "Evento", lambda e: e["kind"], None),
+        ("", "Esecuzione", lambda e: e["run_id"], None),
+        ("", "Proposta", lambda e: e["proposal_id"], None),
+        ("", "Riepilogo", lambda e: summarize(e["kind"], e["payload"]), None),
+        (
+            "",
+            "Dettaglio (JSON)",
+            lambda e: json.dumps(e["payload"], ensure_ascii=False, default=str)[:32000],
+            None,
+        ),
+    ]
+    _sheet(ws, cols, sorted(events, key=lambda e: e["id"]), freeze="A3")
+    ws.column_dimensions["F"].width = 90
+    ws.column_dimensions["G"].width = 60
+    ws.column_dimensions["B"].width = 22
+    ws.column_dimensions["D"].width = 24
+    return _save(wb)

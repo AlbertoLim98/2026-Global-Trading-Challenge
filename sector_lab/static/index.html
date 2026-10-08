@@ -25,7 +25,13 @@ th{font-weight:600;font-size:12px;color:var(--mute);cursor:pointer;user-select:n
 th.g{text-align:center;color:var(--ink);border-bottom:2px solid var(--acc);cursor:default}
 td:first-child,th:first-child{text-align:left}
 tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:color-mix(in srgb,var(--acc) 10%,transparent)}
-#a-tbl td:nth-child(2),#a-tbl th:nth-child(2){text-align:left}
+#a-tbl td:nth-child(2),#a-tbl th:nth-child(2),#r-tbl td:nth-child(2),#r-tbl th:nth-child(2),#j-tbl td,#j-tbl th{text-align:left}
+.btn.primary{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
+.btn:disabled{opacity:.5;cursor:wait}
+.k{display:inline-block;padding:1px 8px;border-radius:10px;font-weight:700;font-size:12px;color:#fff}
+.k.STOP{background:#c0392b}.k.SELL{background:#d9822b}.k.BUY{background:#12805c}
+tr.due{background:color-mix(in srgb,#d9822b 18%,transparent)!important}
+.acts button{margin-right:4px;padding:3px 9px}
 .up{color:var(--up)}.down{color:var(--down)}
 .sc{display:inline-block;min-width:38px;padding:1px 6px;border-radius:10px;font-weight:600;color:#10151f;text-align:center}
 .lab{font-size:12px;padding:1px 7px;border-radius:10px;border:1px solid var(--line)}
@@ -41,7 +47,7 @@ svg{width:100%;height:auto;display:block}
 <body>
 <header>
   <h1>Sector Lab <span class="badge" id="meta"></span></h1>
-  <div class="tabs"><button id="t-s" class="on">Settori</button><button id="t-a">Aziende</button><button id="t-p">Portafoglio paper</button></div>
+  <div class="tabs"><button id="t-s" class="on">Settori</button><button id="t-a">Aziende</button><button id="t-r">Ribilancio</button><button id="t-j">Journal</button><button id="t-p">Portafoglio paper</button></div>
   <a class="btn" id="xlsx" href="/api/export.xlsx" download style="text-decoration:none">Scarica Excel</a>
   <button class="btn" id="refresh">Aggiorna dati</button>
 </header>
@@ -73,6 +79,27 @@ svg{width:100%;height:auto;display:block}
       Trend: prezzo relativo vs sue medie 50/200g. Volume: rapporto 20g/90g del titolo diviso quello di ACWI. Volatilità: tracking error 60g, distanza dal massimo relativo a 52 settimane e volatilità del titolo (più bassa = punteggio più alto).
       Punteggi 0-100 = percentile dentro il settore. Non è un segnale operativo.</p>
       <p class="note" id="a-beta-note" hidden><b>Strategia alto beta:</b> si considerano solo i titoli con trend relativo non ribassista e TWRR ponderato positivo (che stanno battendo ACWI); tra questi si scelgono i 10 con beta a 1 anno più alto e si pesano in proporzione al beta (tetto 25% per titolo). Un beta alto amplifica guadagni e perdite rispetto al mercato.</p></div>
+  </section>
+  <section id="v-r" hidden>
+    <div class="card" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+      <label>Modalità <select id="r-mode"><option value="quality">Qualità (prudente)</option><option value="beta">Alto beta</option></select></label>
+      <label>Capitale $ <input id="r-cap" type="number" value="1000000" step="10000" min="10000" style="width:120px"></label>
+      <button class="btn primary" id="r-run">Avvia ribilanciamento giornaliero</button>
+      <button class="btn" id="r-stops">Controlla stop ATR</button>
+      <span class="badge" id="r-market"></span>
+    </div>
+    <div class="card" id="r-summary" hidden></div>
+    <div class="card wrap"><h3 style="margin-top:0">Proposte da decidere</h3><table id="r-tbl" style="min-width:900px"></table>
+      <p class="note">Nessun ordine parte da solo: per ogni proposta scegli <b>Esegui ora</b> (ordine a mercato sul conto paper), <b>Rifiuta</b> o <b>Rimanda 1 h</b>.
+      Le proposte STOP (perdita &gt; 1 ATR) sono in cima. Ogni passaggio è registrato nel Journal. Le regole non garantiscono l'assenza di perdite: riducono il rischio, non lo eliminano.</p></div>
+  </section>
+  <section id="v-j" hidden>
+    <div class="card" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+      <label>Evento <select id="j-kind"><option value="">Tutti</option><option>RUN</option><option>PROPOSAL</option><option>DECISION</option><option>ORDER</option><option>ORDER_UPDATE</option><option>STOP_CHECK</option><option>ERROR</option></select></label>
+      <button class="btn" id="j-refresh">Aggiorna</button>
+      <a class="btn" href="/api/journal.xlsx" download style="text-decoration:none">Scarica Journal (Excel)</a>
+    </div>
+    <div class="card wrap"><table id="j-tbl" style="min-width:800px"></table></div>
   </section>
   <section id="v-p" hidden><div id="acct"></div></section>
 </main>
@@ -203,6 +230,70 @@ const SCOLS=[
  ['Totale',r=>pill(r.scores.total)]];
 const WCOL=['Peso',r=>pct(r.strategy_weight)];
 const SGROUPS=[['',3],['Trend (vs ACWI)',3],['Momentum (TWRR vs ACWI)',6],['Volume',3],['Volatilità',3],['Beta',2],['',1]];
+
+const POSTH={'Content-Type':'application/json','X-Sector-Lab':'1'};
+async function post(u,b){const r=await fetch(u,{method:'POST',headers:POSTH,body:JSON.stringify(b||{})});const j=await r.json();if(!r.ok)throw new Error(j.error||r.statusText);return j}
+const hhmm=iso=>new Date(iso).toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'});
+const STATUS={pending:'Da decidere',snoozed:'Rimandata'};
+function msg(t,ok){$('#msg').innerHTML=`<div class="${ok?'warn':'err'}">${t}</div>`}
+let rTimer=null;
+function renderProposals(d){
+  $('#r-market').textContent=(d.broker==='demo'?'DEMO · ':'Alpaca paper · ')+(d.market.is_open?'mercato aperto':'mercato chiuso (gli ordini restano in coda fino all\'apertura)');
+  const rows=d.proposals;
+  $('#r-tbl').innerHTML='<thead><tr><th>Tipo</th><th>Titolo</th><th>Qtà</th><th>Prezzo</th><th>Valore</th><th style="text-align:left">Motivo</th><th>Stato</th><th>Azione</th></tr></thead><tbody>'
+   +(rows.length?rows.map(p=>{
+     const st=p.status==='snoozed'?(p.due?'<b>Rimandata: da rivalutare ora</b>':`Rimandata fino alle ${hhmm(p.snooze_until)}`):STATUS[p.status];
+     return `<tr class="${p.due?'due':''}" style="cursor:default"><td><span class="k ${p.kind}">${p.kind==='STOP'?'STOP':p.side==='sell'?'VENDI':'COMPRA'}</span></td>
+     <td><b>${p.symbol}</b> <span class="badge">${p.name} · ${p.sector}</span></td><td>${p.qty}</td><td>${num(p.price)}</td><td>${money(p.value)}</td>
+     <td style="text-align:left;white-space:normal;max-width:380px">${p.reason}</td><td>${st}</td>
+     <td class="acts"><button class="btn primary" data-id="${p.id}" data-a="execute">Esegui ora</button><button class="btn" data-id="${p.id}" data-a="reject">Rifiuta</button><button class="btn" data-id="${p.id}" data-a="snooze">Rimanda 1 h</button></td></tr>`}).join('')
+   :'<tr><td colspan="8" style="text-align:center;color:var(--mute)">Nessuna proposta aperta. Avvia il ribilanciamento giornaliero.</td></tr>')+'</tbody>';
+  $('#r-tbl').querySelectorAll('button[data-id]').forEach(b=>b.onclick=()=>decide(b.dataset.id,b.dataset.a,rows.find(x=>x.id===b.dataset.id)));
+}
+async function loadProposals(){try{renderProposals(await api('/api/rebalance/proposals'))}catch(e){err(e)}}
+async function decide(id,action,p){
+  if(action==='execute'){
+    const what=`${p.side==='sell'?'VENDERE':'COMPRARE'} ${p.qty} ${p.symbol} a mercato (~${money(p.value)}) sul conto PAPER?\n\n${p.reason}`;
+    if(!confirm(what))return;
+  }
+  document.querySelectorAll('#r-tbl button').forEach(b=>b.disabled=true);
+  try{
+    const r=await post('/api/proposal/decide',{id,action});
+    if(action==='execute')msg(`Ordine inviato: ${r.order.order_status} (${r.qty} ${p.symbol}).`+(r.warning?' '+r.warning:''),true);
+    else if(action==='snooze')msg(`Proposta su ${p.symbol} rimandata di 1 ora.`,true);
+    else msg(`Proposta su ${p.symbol} rifiutata.`,true);
+  }catch(e){err(e)}
+  loadProposals();
+}
+async function runRebalance(){
+  const btn=$('#r-run');btn.disabled=true;$('#r-stops').disabled=true;btn.textContent='Calcolo in corso… (scarico le tabelle)';
+  try{
+    const r=await post('/api/rebalance/run',{mode:$('#r-mode').value,capital:+$('#r-cap').value});
+    const sb=r.sector_budgets;
+    $('#r-summary').hidden=false;
+    $('#r-summary').innerHTML=`<b>Esecuzione ${r.run_id}</b> · modalità ${r.params.mode} · capitale ${money(r.params.capital)} · conto ${money(r.account.equity)} (liquidità ${money(r.account.cash)}) · target investito ${money(r.invested_target)} in ${r.n_targets} titoli`
+     +'<div class="wrap"><table style="min-width:600px;margin-top:8px"><thead><tr><th>Settore</th><th>Trend ETF</th><th>Score</th><th>Budget</th><th style="text-align:left">Note</th></tr></thead><tbody>'
+     +sb.map(x=>`<tr style="cursor:default"><td><b>${x.name}</b> <span class="badge">${x.symbol}</span></td><td>${x.trend_label}</td><td>${x.score==null?'–':Math.round(x.score)}</td><td>${x.eligible?money(x.budget):'–'}</td><td style="text-align:left">${x.eligible?'':'escluso: '+x.reason}</td></tr>`).join('')+'</tbody></table></div>'
+     +(r.notes.length?'<p class="note">'+r.notes.join('<br>')+'</p>':'');
+    msg('Ribilanciamento calcolato e registrato nel Journal.',true);
+  }catch(e){err(e)}
+  btn.disabled=false;$('#r-stops').disabled=false;btn.textContent='Avvia ribilanciamento giornaliero';
+  loadProposals();
+}
+async function checkStops(){
+  $('#r-stops').disabled=true;
+  try{const r=await post('/api/rebalance/stops');msg(`Controllo stop: ${r.n_new} nuove proposte su ${r.n_positions} posizioni.`,true)}catch(e){err(e)}
+  $('#r-stops').disabled=false;loadProposals();
+}
+const KIND_LABEL={RUN:'Ribilanciamento',PROPOSAL:'Proposta',DECISION:'Decisione',DECISION_DONE:'Esito',ORDER:'Ordine',ORDER_UPDATE:'Ordine aggiornato',STOP_CHECK:'Controllo stop',SUPERSEDED:'Sostituita',ERROR:'Errore'};
+async function loadJournal(){
+  try{
+    const d=await api('/api/journal?limit=300'+($('#j-kind').value?'&kind='+$('#j-kind').value:''));
+    $('#j-tbl').innerHTML='<thead><tr><th>N.</th><th>Data/ora</th><th>Evento</th><th style="text-align:left">Riepilogo</th></tr></thead><tbody>'
+     +d.events.map(e=>`<tr style="cursor:default"><td>${e.id}</td><td>${new Date(e.ts).toLocaleString('it-IT')}</td><td>${KIND_LABEL[e.kind]||e.kind}</td><td style="text-align:left;white-space:normal">${e.summary}</td></tr>`).join('')+'</tbody>';
+  }catch(e){err(e)}
+}
+$('#r-run').onclick=runRebalance;$('#r-stops').onclick=checkStops;$('#j-refresh').onclick=loadJournal;$('#j-kind').onchange=loadJournal;
 let aInit=false;
 async function loadStocks(refresh){
   const sec=$('#a-sec').value,mode=$('#a-mode').value;
@@ -223,7 +314,10 @@ async function loadStocks(refresh){
   }catch(e){$('#a-meta').textContent='';err(e)}
 }
 function showTab(t){
-  for(const k of ['s','a','p']){$('#v-'+k).hidden=k!==t;$('#t-'+k).classList.toggle('on',k===t)}
+  for(const k of ['s','a','r','j','p']){$('#v-'+k).hidden=k!==t;$('#t-'+k).classList.toggle('on',k===t)}
+  clearInterval(rTimer);
+  if(t==='r'){loadProposals();rTimer=setInterval(loadProposals,30000)}
+  if(t==='j')loadJournal();
   if(t==='p')loadAcct();
   if(t==='a'){
     if(!aInit&&DATA){aInit=true;
@@ -233,7 +327,7 @@ function showTab(t){
       loadStocks(false)}
   }
 }
-$('#t-s').onclick=()=>showTab('s');$('#t-a').onclick=()=>showTab('a');$('#t-p').onclick=()=>showTab('p');
+$('#t-s').onclick=()=>showTab('s');$('#t-a').onclick=()=>showTab('a');$('#t-r').onclick=()=>showTab('r');$('#t-j').onclick=()=>showTab('j');$('#t-p').onclick=()=>showTab('p');
 $('#refresh').onclick=()=>load(true);
 load(false);
 </script>

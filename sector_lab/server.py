@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import os
 import sys
 import threading
 import time
@@ -22,8 +23,11 @@ from urllib.parse import parse_qs, urlparse
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import broker as broker_mod
 import data
+import desk as desk_mod
 import export
+import journal as journal_mod
 import metrics
 import stocks
 
@@ -37,6 +41,10 @@ class State:
         self._at = 0.0
         self._stocks: dict[str, tuple[float, dict]] = {}
         self._lock = threading.Lock()
+
+    def fetch_bars(self, symbols: list[str]) -> dict:
+        """Storico giornaliero di simboli arbitrari (dati demo o Alpaca)."""
+        return data.demo_bars(symbols) if self.demo else data.fetch_bars(symbols, self.feed)
 
     def bars(self, refresh: bool = False) -> dict:
         with self._lock:
@@ -96,7 +104,9 @@ class State:
         }
 
 
-def make_handler(state: State) -> type[BaseHTTPRequestHandler]:
+def make_handler(state: State, desk: desk_mod.Desk, port: int) -> type[BaseHTTPRequestHandler]:
+    allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+
     class H(BaseHTTPRequestHandler):
         def _json(self, obj: object, status: int = 200) -> None:
             body = json.dumps(obj, allow_nan=False).encode()
@@ -116,7 +126,40 @@ def make_handler(state: State) -> type[BaseHTTPRequestHandler]:
             self.end_headers()
             self.wfile.write(body)
 
+        def _host_ok(self) -> bool:
+            """Blocca le richieste con Host diverso da localhost (protezione da DNS rebinding)."""
+            return self.headers.get("Host", "") in allowed_hosts
+
+        def do_POST(self) -> None:
+            # Un altro sito aperto nel browser non deve poter inviare ordini: serve un'intestazione
+            # personalizzata (non inviabile cross-origin senza consenso) e un Host locale.
+            if not self._host_ok() or self.headers.get("X-Sector-Lab") != "1":
+                self._json({"error": "richiesta rifiutata"}, 403)
+                return
+            url = urlparse(self.path)
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n) or b"{}")
+                if url.path == "/api/rebalance/run":
+                    mode = body.get("mode", "quality")
+                    capital = float(body.get("capital", 1_000_000))
+                    self._json(desk.run(mode, capital))
+                elif url.path == "/api/rebalance/stops":
+                    self._json(desk.stop_check())
+                elif url.path == "/api/proposal/decide":
+                    self._json(desk.decide(str(body.get("id", "")), str(body.get("action", ""))))
+                else:
+                    self._json({"error": "non trovato"}, 404)
+            except desk_mod.DeskError as e:
+                self._json({"error": str(e)}, 400)
+            except Exception as e:  # noqa: BLE001
+                desk.journal.log("ERROR", {"message": f"{type(e).__name__}: {e}", "path": url.path})
+                self._json({"error": f"{type(e).__name__}: {e}"}, 500)
+
         def do_GET(self) -> None:
+            if not self._host_ok():
+                self._json({"error": "richiesta rifiutata"}, 403)
+                return
             url = urlparse(self.path)
             q = parse_qs(url.query)
             try:
@@ -166,10 +209,35 @@ def make_handler(state: State) -> type[BaseHTTPRequestHandler]:
                     else:
                         self._json(metrics.history(bars[sym]))
                 elif url.path == "/api/account":
-                    if state.demo:
-                        self._json({"error": "modalità demo: nessun conto collegato"}, 503)
-                    else:
-                        self._json(data.account_snapshot())
+                    acc = desk.broker.account()
+                    pos = desk.broker.positions()
+                    self._json({**acc, "positions": pos, "broker": desk.broker.name})
+                elif url.path == "/api/rebalance/proposals":
+                    desk.refresh_orders()
+                    self._json(
+                        {
+                            "proposals": desk.open_proposals(),
+                            "market": desk.broker.clock(),
+                            "broker": desk.broker.name,
+                        }
+                    )
+                elif url.path == "/api/proposals/history":
+                    self._json({"proposals": desk.journal.proposals()[:300]})
+                elif url.path == "/api/journal":
+                    limit = int((q.get("limit") or ["300"])[0])
+                    kind = (q.get("kind") or [None])[0]
+                    ev = desk.journal.events(limit, kind)
+                    for e in ev:
+                        e["summary"] = journal_mod.summarize(e["kind"], e["payload"])
+                        e["payload"] = (
+                            {} if e["kind"] == "RUN" else e["payload"]
+                        )  # il RUN è nel file Excel
+                    self._json({"events": ev})
+                elif url.path == "/api/journal.xlsx":
+                    ev = desk.journal.events(100000)
+                    self._xlsx(
+                        export.build_journal(ev), f"journal_{time.strftime('%Y-%m-%d')}.xlsx"
+                    )
                 else:
                     self._json({"error": "non trovato"}, 404)
             except Exception as e:  # noqa: BLE001 - mostra l'errore nell'interfaccia invece di chiudere
@@ -195,10 +263,19 @@ def main() -> None:
             "Chiavi Alpaca mancanti: compila ALPACA_API_KEY e ALPACA_SECRET_KEY in .env, "
             "oppure usa --demo."
         )
-    import os
-
     feed = a.feed or os.environ.get("ALPACA_DATA_FEED", "iex")
-    srv = ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(State(a.demo, feed)))
+    state = State(a.demo, feed)
+    if a.demo:
+        syms = [*data.load_universe().ticker, data.STOCK_BENCHMARK, *data.SECTORS, data.BENCHMARK]
+        prices = {k: float(v["close"].iloc[-1]) for k, v in data.demo_bars(syms).items()}
+        broker = broker_mod.DemoBroker(1_000_000.0, prices)
+        jpath = HERE / "journal_demo.db"
+    else:
+        creds = data.keys()
+        broker = broker_mod.AlpacaBroker(*creds, feed=feed)
+        jpath = Path(os.environ.get("SECTOR_LAB_JOURNAL", HERE / "journal.db"))
+    desk = desk_mod.Desk(state, broker, journal_mod.Journal(jpath))
+    srv = ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(state, desk, a.port))
     url = f"http://127.0.0.1:{a.port}"
     print(f"Sector Lab su {url}  ({'DEMO' if a.demo else 'Alpaca paper, feed ' + feed})")
     if not a.no_browser:
