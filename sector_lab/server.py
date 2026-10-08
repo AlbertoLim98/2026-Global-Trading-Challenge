@@ -212,6 +212,9 @@ def make_handler(state: State, desk: desk_mod.Desk, port: int) -> type[BaseHTTPR
                     acc = desk.broker.account()
                     pos = desk.broker.positions()
                     self._json({**acc, "positions": pos, "broker": desk.broker.name})
+                elif url.path == "/api/portfolio":
+                    desk.refresh_orders()
+                    self._json(desk.portfolio())
                 elif url.path == "/api/rebalance/proposals":
                     desk.refresh_orders()
                     trades = desk.trades()

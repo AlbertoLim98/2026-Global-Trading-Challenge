@@ -11,13 +11,16 @@ from __future__ import annotations
 import math
 import time
 import uuid
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import data
 import metrics
 import portfolio
 from journal import Journal, now
 
+NY = ZoneInfo("America/New_York")
 SETTLE_SECONDS = 15  # attesa massima dell'esito delle vendite prima di inviare gli acquisti
 FAILED_ORDER = {"canceled", "expired", "rejected", "suspended", "done_for_day"}
 # campi dello stato dell'invio, da non copiare in una operazione riposizionata
@@ -329,6 +332,80 @@ class Desk:
 
     def trades(self) -> list[dict]:
         return self.journal.trades()
+
+    # --- portafoglio -----------------------------------------------------------------------------------
+    def movements_today(self) -> list[dict]:
+        """Movimenti eseguiti oggi (giorno di borsa, fuso di New York), dal più recente."""
+        today = datetime.now(NY).date()
+        out = []
+        for pr in self.journal.proposals(("filled",)):
+            when = datetime.fromisoformat(pr["updated"])
+            if when.astimezone(NY).date() != today:
+                continue
+            qty = pr.get("filled_qty") or pr.get("exec_qty") or pr["qty"]
+            price = pr.get("filled_avg_price") or pr["price"]
+            out.append(
+                {
+                    "time": pr["updated"],
+                    "side": pr["side"],
+                    "kind": pr["kind"],
+                    "symbol": pr["symbol"],
+                    "name": pr["name"],
+                    "qty": qty,
+                    "price": price,
+                    "value": qty * price,
+                    "order_type": pr.get("order_type", "market"),
+                    "reason": pr["reason"],
+                }
+            )
+        return sorted(out, key=lambda m: m["time"], reverse=True)
+
+    def portfolio(self) -> dict:
+        """Composizione, P/L giornaliero e da apertura, movimenti di oggi."""
+        acct = self.broker.account()
+        equity = acct["equity"]
+        rows = []
+        for p in self.broker.positions():
+            info = self.managed.get(p["symbol"])
+            rows.append(
+                {
+                    **p,
+                    "name": info["name"] if info else p["symbol"],
+                    "sector": info["sector"] if info else None,
+                    "sector_name": data.SECTORS.get(info["sector"], "")
+                    if info
+                    else "Fuori strategia",
+                    "weight": p["market_value"] / equity if equity else 0.0,
+                }
+            )
+        rows.sort(key=lambda r: -r["market_value"])
+        by_sector: dict[str, dict] = {}
+        for r in rows:
+            d = by_sector.setdefault(
+                r["sector_name"], {"sector_name": r["sector_name"], "value": 0.0, "n": 0, "pl": 0.0}
+            )
+            d["value"] += r["market_value"]
+            d["pl"] += r["pl"]
+            d["n"] += 1
+        for d in by_sector.values():
+            d["weight"] = d["value"] / equity if equity else 0.0
+        day_pl = equity - acct["last_equity"]
+        opening = self.journal.opening()
+        base = opening["equity"] if opening else None
+        return {
+            "broker": self.broker.name,
+            "account": acct,
+            "cash_weight": acct["cash"] / equity if equity else 0.0,
+            "day_pl": day_pl,
+            "day_pl_pct": day_pl / acct["last_equity"] if acct["last_equity"] else None,
+            "opening": opening,
+            "since_open_pl": equity - base if base else None,
+            "since_open_pct": (equity / base - 1) if base else None,
+            "unrealized_pl": sum(r["pl"] for r in rows),
+            "positions": rows,
+            "sectors": sorted(by_sector.values(), key=lambda d: -d["value"]),
+            "movements": self.movements_today(),
+        }
 
 
 def _slim_sector(r: dict) -> dict:

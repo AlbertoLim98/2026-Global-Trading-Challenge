@@ -75,6 +75,7 @@ class AlpacaBroker:
                 "market_value": float(p.market_value),
                 "pl": float(p.unrealized_pl),
                 "pl_pct": float(p.unrealized_plpc),
+                "day_pl": float(getattr(p, "unrealized_intraday_pl", None) or 0.0),
             }
             for p in self._t.get_all_positions()
         ]
@@ -183,6 +184,7 @@ class DemoBroker:
                     "market_value": p["qty"] * px,
                     "pl": p["qty"] * (px - p["avg_entry"]),
                     "pl_pct": px / p["avg_entry"] - 1,
+                    "day_pl": 0.0,
                 }
             )
         return out

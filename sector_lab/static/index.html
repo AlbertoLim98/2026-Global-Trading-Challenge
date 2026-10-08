@@ -48,7 +48,7 @@ svg{width:100%;height:auto;display:block}
 </head>
 <body>
 <header>
-  <h1>Sector Lab <span class="badge" id="meta"></span></h1>
+  <h1>Sector Lab</h1>
   <div class="tabs"><button id="t-s" class="on">Settori</button><button id="t-a">Aziende</button><button id="t-r">Ribilancio</button><button id="t-j">Journal</button><button id="t-p">Portafoglio paper</button></div>
   <a class="btn" id="xlsx" href="/api/export.xlsx" download style="text-decoration:none">Scarica Excel</a>
   <button class="btn" id="refresh">Aggiorna dati</button>
@@ -56,6 +56,7 @@ svg{width:100%;height:auto;display:block}
 <main>
   <div id="msg"></div>
   <section id="v-s">
+    <div id="s-info"></div>
     <div class="card wrap"><table id="tbl"></table>
       <p class="note">Punteggi 0-100 = posizione del settore rispetto agli altri 10 (percentile), non un segnale operativo.
       Trend: prezzo vs medie 50/200 giorni. Momentum: rendimenti 3/6/12 mesi e forza relativa vs SPY a 3 mesi.
@@ -156,17 +157,16 @@ async function api(u){const r=await fetch(u);const j=await r.json();if(!r.ok)thr
 function err(e){$('#msg').innerHTML=`<div class="err">${e.message}</div>`}
 
 async function load(refresh){
-  $('#msg').innerHTML='';$('#meta').textContent='caricamento…';
+  $('#s-info').innerHTML='<p class="badge">caricamento…</p>';
   try{
     DATA=await api('/api/sectors'+(refresh?'?refresh=1':''));
-    $('#meta').textContent=`· feed ${DATA.feed} · aggiornato ${DATA.updated}`;
-    let m='';
+    let m=`<p class="badge" style="margin:0 0 8px">Feed ${DATA.feed} · aggiornato ${DATA.updated}</p>`;
     if(DATA.demo)m+='<div class="warn">MODALITÀ DEMO: dati sintetici, non reali.</div>';
     else if(DATA.feed==='iex')m+='<div class="warn">Feed IEX (gratuito): i volumi sono solo quelli della borsa IEX, una piccola parte del totale. I rapporti tra volumi restano confrontabili, i valori assoluti no.</div>';
-    $('#msg').innerHTML=m;
+    $('#s-info').innerHTML=m;
     render();
     if(selected)select(selected);
-  }catch(e){$('#meta').textContent='';err(e)}
+  }catch(e){$('#s-info').innerHTML='';err(e)}
 }
 
 async function select(sym){
@@ -192,18 +192,30 @@ function chart(h){
   $('#chart').innerHTML=s;
 }
 
+const when=iso=>new Date(iso).toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+const sgn=v=>(v>0?'+':'')+money(v);
 async function loadAcct(){
-  const el=$('#acct');el.innerHTML='caricamento…';
+  const el=$('#acct');if(!el.innerHTML)el.innerHTML='caricamento…';
   try{
-    const a=await api('/api/account');const day=a.equity-a.last_equity;
+    const a=await api('/api/portfolio');const ac=a.account;
+    const open=a.opening?`dal ${new Date(a.opening.ts).toLocaleDateString('it-IT')} (${money(a.opening.equity)})`:'nessun ribilanciamento ancora registrato';
     el.innerHTML=`<div class="card grid">
-      <div class="kpi"><b>${money(a.equity)}</b><span>Patrimonio</span></div>
-      <div class="kpi"><b>${money(a.cash)}</b><span>Liquidità</span></div>
-      <div class="kpi"><b>${money(a.buying_power)}</b><span>Potere d'acquisto</span></div>
-      <div class="kpi"><b class="${cls(day)}">${money(day)}</b><span>Variazione giorno</span></div></div>
-      <div class="card wrap"><table style="min-width:600px"><thead><tr><th>Titolo</th><th>Qtà</th><th>Prezzo medio</th><th>Prezzo</th><th>Valore</th><th>P/L</th><th>P/L %</th></tr></thead><tbody>`
-      +(a.positions.length?a.positions.map(p=>`<tr><td><b>${p.symbol}</b></td><td>${p.qty}</td><td>${num(p.avg_entry)}</td><td>${num(p.price)}</td><td>${money(p.market_value)}</td><td class="${cls(p.pl)}">${money(p.pl)}</td><td class="${cls(p.pl_pct)}">${pct(p.pl_pct)}</td></tr>`).join(''):'<tr><td colspan="7" style="text-align:center;color:var(--mute)">Nessuna posizione aperta</td></tr>')
-      +'</tbody></table></div><p class="note">Conto paper in sola lettura: questa app non invia ordini.</p>';
+      <div class="kpi"><b>${money(ac.equity)}</b><span>Patrimonio</span></div>
+      <div class="kpi"><b>${money(ac.cash)}</b><span>Liquidità (${pct(a.cash_weight)})</span></div>
+      <div class="kpi"><b class="${cls(a.day_pl)}">${sgn(a.day_pl)}</b><span>Guadagno/perdita oggi ${a.day_pl_pct==null?'':'('+pct(a.day_pl_pct,2)+')'}</span></div>
+      <div class="kpi"><b class="${a.since_open_pl==null?'':cls(a.since_open_pl)}">${a.since_open_pl==null?'–':sgn(a.since_open_pl)}</b><span>Da apertura portafoglio ${a.since_open_pct==null?'':'('+pct(a.since_open_pct,2)+')'}<br>${open}</span></div>
+      <div class="kpi"><b class="${cls(a.unrealized_pl)}">${sgn(a.unrealized_pl)}</b><span>P/L non realizzato posizioni</span></div></div>
+      <div class="card wrap"><h3 style="margin-top:0">Composizione del portafoglio <span class="badge">${a.positions.length} titoli · ${a.broker==='demo'?'DEMO':'Alpaca paper'}</span></h3>
+      <table style="min-width:900px"><thead><tr><th style="text-align:left">Titolo</th><th style="text-align:left">Settore</th><th>Qtà</th><th>Prezzo medio</th><th>Prezzo</th><th>Valore</th><th>Peso</th><th>P/L oggi</th><th>P/L totale</th><th>P/L %</th></tr></thead><tbody>`
+      +(a.positions.length?a.positions.map(p=>`<tr style="cursor:default"><td style="text-align:left"><b>${p.symbol}</b> <span class="badge">${p.name}</span></td><td style="text-align:left">${p.sector_name}</td><td>${p.qty}</td><td>${num(p.avg_entry)}</td><td>${num(p.price)}</td><td>${money(p.market_value)}</td><td><b>${pct(p.weight)}</b></td><td class="${cls(p.day_pl)}">${sgn(p.day_pl)}</td><td class="${cls(p.pl)}">${sgn(p.pl)}</td><td class="${cls(p.pl_pct)}">${pct(p.pl_pct)}</td></tr>`).join('')
+        +`<tr style="cursor:default"><td style="text-align:left"><b>Liquidità</b></td><td></td><td></td><td></td><td></td><td>${money(ac.cash)}</td><td><b>${pct(a.cash_weight)}</b></td><td></td><td></td><td></td></tr>`
+        :'<tr><td colspan="10" style="text-align:center;color:var(--mute)">Nessuna posizione aperta</td></tr>')
+      +'</tbody></table></div>'
+      +`<div class="card wrap"><h3 style="margin-top:0">Per settore</h3><table style="min-width:500px"><thead><tr><th style="text-align:left">Settore</th><th>Titoli</th><th>Valore</th><th>Peso</th><th>P/L totale</th></tr></thead><tbody>`
+      +a.sectors.map(x=>`<tr style="cursor:default"><td style="text-align:left"><b>${x.sector_name}</b></td><td>${x.n}</td><td>${money(x.value)}</td><td><b>${pct(x.weight)}</b></td><td class="${cls(x.pl)}">${sgn(x.pl)}</td></tr>`).join('')+'</tbody></table></div>'
+      +`<div class="card wrap"><h3 style="margin-top:0">Movimenti eseguiti oggi <span class="badge">${a.movements.length}</span></h3><table style="min-width:700px"><thead><tr><th style="text-align:left">Ora</th><th style="text-align:left">Tipo</th><th style="text-align:left">Titolo</th><th>Qtà</th><th>Prezzo</th><th>Valore</th><th style="text-align:left">Motivo</th></tr></thead><tbody>`
+      +(a.movements.length?a.movements.map(m=>`<tr style="cursor:default"><td style="text-align:left">${when(m.time)}</td><td style="text-align:left"><span class="k ${m.kind}">${m.kind==='STOP'?'STOP':m.side==='sell'?'VENDITA':'ACQUISTO'}</span>${m.order_type==='limit'?' <span class="badge">limite</span>':''}</td><td style="text-align:left"><b>${m.symbol}</b> <span class="badge">${m.name}</span></td><td>${m.qty}</td><td>${num(m.price)}</td><td>${money(m.value)}</td><td style="text-align:left;white-space:normal;max-width:380px">${m.reason}</td></tr>`).join(''):'<tr><td colspan="7" style="text-align:center;color:var(--mute)">Nessun movimento eseguito oggi</td></tr>')
+      +'</tbody></table></div>';
   }catch(e){el.innerHTML=`<div class="card">${e.message}</div>`}
 }
 
@@ -316,7 +328,7 @@ async function loadStocks(refresh){
 }
 function showTab(t){
   for(const k of ['s','a','r','j','p']){$('#v-'+k).hidden=k!==t;$('#t-'+k).classList.toggle('on',k===t)}
-  clearInterval(rTimer);
+  clearInterval(rTimer);$('#msg').innerHTML='';
   if(t==='r'){loadTrades();rTimer=setInterval(loadTrades,30000)}
   if(t==='j')loadJournal();
   if(t==='p')loadAcct();

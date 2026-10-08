@@ -66,8 +66,35 @@ def test_targets_skip_bearish_and_low_score_and_respect_caps():
     )
     assert "BAD" not in t["targets"]  # trend relativo ribassista
     assert max(x["value"] for x in t["targets"].values()) <= P.max_stock * P.capital + 1e-6
-    # un solo settore idoneo: tetto 25% del capitale, il resto resta liquidità
-    assert sum(x["value"] for x in t["targets"].values()) <= P.max_sector * P.capital + 1e-6
+    # nessun tetto per settore: con un solo settore idoneo e 10 titoli si investe fino al 97%
+    assert sum(x["value"] for x in t["targets"].values()) == pytest.approx(
+        P.capital * (1 - P.cash_reserve)
+    )
+    assert P.max_stock == 0.10 and not hasattr(P, "max_sector")
+
+
+def test_two_sectors_only_every_stock_capped_at_10_percent_of_portfolio():
+    secs = [_sector("XLK", "Rialzista", 90), _sector("XLF", "Rialzista", 70)] + [
+        _sector(e, "Ribassista", 80) for e in ("XLE", "XLV")
+    ]
+    top = {
+        "XLK": {"top": [_stock(f"K{i}", 90 - i) for i in range(10)]},
+        "XLF": {"top": [_stock(f"F{i}", 70 - i) for i in range(10)]},
+    }
+    t = portfolio.build_targets(secs, top, P)
+    vals = [x["value"] for x in t["targets"].values()]
+    assert len(vals) == 20 and max(vals) <= 0.10 * P.capital + 1e-6
+    assert sum(vals) == pytest.approx(P.capital * (1 - P.cash_reserve))
+    by = {x["symbol"]: x for x in t["sectors"]}
+    assert by["XLK"]["budget"] > by["XLF"]["budget"] > 0 and by["XLE"]["budget"] == 0
+
+
+def test_too_few_titles_leave_cash_instead_of_breaking_the_cap():
+    secs = [_sector("XLK", "Rialzista", 90)]
+    top = {"XLK": {"top": [_stock(f"K{i}", 80) for i in range(3)]}}
+    t = portfolio.build_targets(secs, top, P)
+    assert all(x["value"] == pytest.approx(0.10 * P.capital) for x in t["targets"].values())
+    assert sum(x["value"] for x in t["targets"].values()) == pytest.approx(0.30 * P.capital)
 
 
 def test_proposals_stop_exit_buy_and_unmanaged():
@@ -343,6 +370,27 @@ def test_new_run_archives_old_failures(env, monkeypatch):
     monkeypatch.undo()
     desk.run("quality", 1_000_000)
     assert old and all(desk.journal.get_proposal(i)["status"] == "superseded" for i in old)
+
+
+def test_portfolio_view_composition_pl_and_todays_movements(env):
+    desk, _, prices = env
+    assert desk.portfolio()["opening"] is None and desk.portfolio()["since_open_pl"] is None
+    desk.run("quality", 1_000_000)
+    v = desk.portfolio()
+    acct = v["account"]
+    assert v["opening"]["equity"] == pytest.approx(1_000_000.0)
+    assert v["since_open_pl"] == pytest.approx(acct["equity"] - 1_000_000.0)
+    assert v["day_pl"] == pytest.approx(acct["equity"] - acct["last_equity"])
+    assert sum(r["weight"] for r in v["positions"]) + v["cash_weight"] == pytest.approx(1.0)
+    assert max(r["weight"] for r in v["positions"]) <= 0.10 + 1e-3  # nessun titolo oltre il 10%
+    assert sum(x["weight"] for x in v["sectors"]) == pytest.approx(1 - v["cash_weight"])
+    assert len(v["movements"]) == len(v["positions"]) and all(
+        m["side"] == "buy" for m in v["movements"]
+    )
+    assert v["movements"][0]["time"] >= v["movements"][-1]["time"]  # dal più recente
+    sym = v["positions"][0]["symbol"]
+    prices[sym] *= 1.1  # il prezzo sale: P/L non realizzato positivo
+    assert next(r for r in desk.portfolio()["positions"] if r["symbol"] == sym)["pl"] > 0
 
 
 def test_reposition_only_for_failed(env):

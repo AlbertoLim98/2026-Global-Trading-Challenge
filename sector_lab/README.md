@@ -64,10 +64,10 @@ tutto dalle posizioni reali.
 
 Regole dell'algoritmo (`portfolio.py`, parametri in `Params`):
 
-1. settori idonei: ETF non ribassista e punteggio totale >= 50; budget in proporzione al punteggio,
-   massimo 25% del capitale per settore;
+1. settori idonei: ETF non ribassista e punteggio totale >= 50; peso in proporzione al punteggio,
+   **senza tetto per settore** (anche solo 2 settori vanno bene);
 2. titoli: solo la top 10 del settore con trend relativo non ribassista e TWRR > 0; pesi in
-   proporzione al punteggio (o al beta in modalità alto beta); massimo 5% del capitale per titolo;
+   proporzione al punteggio (o al beta in modalità alto beta); **massimo 10% del capitale per titolo** (l'eccedenza passa agli altri; se i titoli sono pochi resta liquidità);
 3. liquidità minima 3%; gli acquisti si riducono se manca liquidità;
 4. **stop**: perdita per azione > 1 ATR(14) -> vendita completa proposta con priorità massima
    (pulsante "Controlla stop ATR" per verificarlo durante la giornata senza rifare le tabelle);
@@ -79,6 +79,10 @@ Regole dell'algoritmo (`portfolio.py`, parametri in `Params`):
 
 Queste regole **riducono** il rischio di perdite, non lo eliminano: nessun algoritmo può garantire
 guadagni senza perdite.
+
+La scheda **Portafoglio paper** mostra la composizione (titoli con peso, P/L di oggi e totale; liquidità;
+ripartizione per settore), il guadagno/perdita di oggi e da apertura portafoglio (patrimonio al primo
+ribilanciamento registrato) e, in un elenco a parte, i movimenti eseguiti oggi (giorno di borsa di New York).
 
 Il **Journal** (SQLite `sector_lab/journal.db`, solo accodamento: modifiche e cancellazioni sono
 bloccate) registra ogni esecuzione con le tabelle usate e i target, ogni proposta, decisione,

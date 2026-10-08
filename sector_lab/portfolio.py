@@ -2,14 +2,14 @@
 
 Modulo puro (nessuna rete, nessun ordine): riceve tabelle, posizioni, prezzi e ATR e restituisce
 l'allocazione obiettivo e l'elenco delle proposte di acquisto/vendita. Le proposte non vengono
-eseguite qui: le decide l'utente una per una.
+eseguite qui: le invia `desk.py`.
 
 Regole (tutte modificabili in `Params`):
   1. Settori idonei: trend dell'ETF non ribassista e punteggio totale >= `min_sector_score`.
-  2. Budget per settore proporzionale al punteggio, tetto `max_sector` del capitale; il resto è liquidità.
+  2. Peso dei settori proporzionale al punteggio, senza tetto per settore (anche solo 2 settori vanno bene).
   3. Dentro il settore: solo le aziende della top 10 con trend relativo non ribassista e TWRR > 0,
      peso proporzionale al punteggio (modalità qualità) o al peso beta (modalità alto beta),
-     tetto `max_stock` del capitale per titolo.
+     tetto `max_stock` (10%) del capitale per titolo; l'eccedenza passa agli altri titoli.
   4. Riserva di liquidità minima `cash_reserve`.
   5. Stop: posizione con perdita per azione > `atr_stop_mult` x ATR(14) -> vendita proposta con priorità
      massima (nessun divieto di riacquisto: se il titolo è ancora in classifica può essere ricomprato).
@@ -33,8 +33,7 @@ import stocks
 class Params:
     capital: float = 1_000_000.0
     cash_reserve: float = 0.03
-    max_sector: float = 0.25
-    max_stock: float = 0.05
+    max_stock: float = 0.10
     min_sector_score: float = 50.0
     min_trade: float = 2_000.0
     drift_tolerance: float = 0.20
@@ -67,35 +66,35 @@ def allocate(raw: dict[str, float], total: float, cap: float) -> dict[str, float
 
 
 def sector_budgets(sector_rows: list[dict], p: Params) -> list[dict]:
-    """Settori idonei con budget in dollari. Tutti i settori compaiono, con motivo se esclusi."""
-    invest = p.capital * (1 - p.cash_reserve)
-    raw: dict[str, float] = {}
-    out = {}
+    """Settori con idoneità e peso grezzo. Tutti compaiono, con il motivo se esclusi.
+
+    Il budget in dollari viene assegnato da `build_targets` insieme ai titoli.
+    """
+    out = []
     for r in sector_rows:
         total = (r.get("scores") or {}).get("total")
         ok = r["trend_label"] != "Ribassista" and total is not None and total >= p.min_sector_score
-        out[r["symbol"]] = {
-            "symbol": r["symbol"],
-            "name": r["name"],
-            "trend_label": r["trend_label"],
-            "score": total,
-            "eligible": ok,
-            "budget": 0.0,
-            "reason": ""
-            if ok
-            else (
-                "trend ribassista"
-                if r["trend_label"] == "Ribassista"
-                else f"punteggio < {p.min_sector_score:g}"
-            ),
-        }
-        if ok:
-            raw[r["symbol"]] = (
-                total - p.min_sector_score + 10
-            )  # chi supera appena la soglia pesa poco
-    for etf, amount in allocate(raw, invest, p.max_sector * p.capital).items():
-        out[etf]["budget"] = amount
-    return sorted(out.values(), key=lambda s: -(s["score"] or 0))
+        out.append(
+            {
+                "symbol": r["symbol"],
+                "name": r["name"],
+                "trend_label": r["trend_label"],
+                "score": total,
+                "eligible": ok,
+                "budget": 0.0,
+                "raw_weight": total - p.min_sector_score + 10
+                if ok
+                else 0.0,  # chi supera appena la soglia pesa poco
+                "reason": ""
+                if ok
+                else (
+                    "trend ribassista"
+                    if r["trend_label"] == "Ribassista"
+                    else f"punteggio < {p.min_sector_score:g}"
+                ),
+            }
+        )
+    return sorted(out, key=lambda s: -(s["score"] or 0))
 
 
 def build_targets(
@@ -103,33 +102,46 @@ def build_targets(
     stocks_by_etf: dict[str, dict],
     p: Params,
 ) -> dict:
-    """Allocazione obiettivo: settori con budget e titoli con valore in dollari."""
+    """Allocazione obiettivo: titoli con valore in dollari e budget risultante per settore.
+
+    Nessun tetto per settore (anche due soli settori vanno bene): l'unico limite è `max_stock` del
+    capitale per titolo. Il peso di un titolo è (peso del settore) x (sua quota dentro il settore);
+    l'eccedenza dei titoli al tetto passa agli altri, in tutti i settori.
+    """
     sectors = sector_budgets(sector_rows, p)
-    targets: dict[str, dict] = {}
+    invest = p.capital * (1 - p.cash_reserve)
+    raw_all: dict[str, float] = {}
+    info: dict[str, dict] = {}
     for s in sectors:
-        if not s["eligible"] or s["budget"] <= 0:
+        if not s["eligible"]:
             continue
         top = (stocks_by_etf.get(s["symbol"]) or {}).get("top", [])
         cand = [r for r in top if stocks.is_eligible(r)]
         if p.mode == "beta":
-            raw = {r["symbol"]: r.get("strategy_weight") or max(r["beta_1y"], 0.01) for r in cand}
+            inner = {r["symbol"]: r.get("strategy_weight") or max(r["beta_1y"], 0.01) for r in cand}
         else:
-            raw = {r["symbol"]: r["scores"]["total"] or 0 for r in cand}
-        alloc = allocate(raw, s["budget"], p.max_stock * p.capital)
+            inner = {r["symbol"]: r["scores"]["total"] or 0 for r in cand}
+        tot = sum(inner.values())
         s["n_candidates"] = len(cand)
-        s["allocated"] = sum(alloc.values())
         for r in cand:
-            v = alloc.get(r["symbol"], 0.0)
-            if v > 0:
-                targets[r["symbol"]] = {
-                    "symbol": r["symbol"],
-                    "name": r["name"],
-                    "sector": s["symbol"],
-                    "value": v,
-                    "price": r["price"],
-                    "score": r["scores"]["total"],
-                    "beta": r.get("beta_1y"),
-                }
+            if tot > 0 and inner[r["symbol"]] > 0:
+                raw_all[r["symbol"]] = s["raw_weight"] * inner[r["symbol"]] / tot
+                info[r["symbol"]] = {"row": r, "sector": s["symbol"]}
+    alloc = allocate(raw_all, invest, p.max_stock * p.capital)
+    targets: dict[str, dict] = {}
+    for sym, v in alloc.items():
+        r = info[sym]["row"]
+        targets[sym] = {
+            "symbol": sym,
+            "name": r["name"],
+            "sector": info[sym]["sector"],
+            "value": v,
+            "price": r["price"],
+            "score": r["scores"]["total"],
+            "beta": r.get("beta_1y"),
+        }
+    for s in sectors:
+        s["budget"] = sum(t["value"] for t in targets.values() if t["sector"] == s["symbol"])
     return {"sectors": sectors, "targets": targets}
 
 

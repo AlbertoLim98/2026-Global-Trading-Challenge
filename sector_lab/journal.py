@@ -160,6 +160,17 @@ class Journal:
             ).fetchone()
         return r["run_id"] if r else None
 
+    def opening(self) -> dict | None:
+        """Apertura del portafoglio: data e patrimonio del conto al primo ribilanciamento registrato."""
+        with self._lock:
+            r = self._db.execute(
+                "SELECT ts, payload FROM events WHERE kind = 'RUN' ORDER BY id ASC LIMIT 1"
+            ).fetchone()
+        if not r:
+            return None
+        acct = json.loads(r["payload"]).get("account") or {}
+        return {"ts": r["ts"], "equity": acct.get("equity")}
+
     def trades(self) -> list[dict]:
         """Operazioni dell'ultima esecuzione (e controlli stop successivi) più tutto ciò che è attivo."""
         last = self.latest_run_id()

@@ -192,7 +192,7 @@ BETA_NOTES = [
     "STRATEGIA ALTO BETA (sistematica, solo acquisto): per ogni settore",
     "  1. Filtro: trend relativo non Ribassista e TWRR ponderato > 0 (il titolo sta battendo ACWI).",
     "  2. Priorità: tra gli idonei, i 10 con beta a 1 anno più alto.",
-    "  3. Pesi nel settore proporzionali al beta, con tetto del 25% per titolo.",
+    "  3. Pesi nel settore proporzionali al beta, con tetto del 25% per titolo (solo per la tabella delle aziende).",
     "  Se gli idonei sono meno di 10 la lista è più corta: nessun titolo non idoneo viene aggiunto.",
     "  Un beta alto amplifica sia i guadagni sia le perdite rispetto al mercato: è una scelta di rischio, non di qualità.",
 ]
