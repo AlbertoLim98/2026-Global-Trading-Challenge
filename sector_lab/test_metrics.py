@@ -75,3 +75,26 @@ def test_demo_bars_cover_all_sectors_and_json_safe():
     bars = data.demo_bars([*data.SECTORS, data.BENCHMARK])
     rows = {s: metrics.compute(bars[s], bars["SPY"]["close"]) for s in data.SECTORS}
     json.dumps({"r": rows, "s": metrics.score(rows)}, allow_nan=False)
+
+
+def test_xlsx_export_roundtrip():
+    import io
+
+    import export
+    from openpyxl import load_workbook
+
+    bars = data.demo_bars([*data.SECTORS, data.BENCHMARK])
+    rows = {s: metrics.compute(bars[s], bars["SPY"]["close"]) for s in data.SECTORS}
+    sc = metrics.score(rows)
+    payload = {
+        "demo": True,
+        "feed": "demo",
+        "updated": "2026-10-08 10:00:00",
+        "sectors": [
+            {"symbol": s, "name": data.SECTORS[s], **rows[s], "scores": sc[s]} for s in rows
+        ],
+    }
+    ws = load_workbook(io.BytesIO(export.build(payload)))["Settori"]
+    assert ws.max_row == 2 + len(data.SECTORS)
+    totals = [ws.cell(r, ws.max_column).value for r in range(3, ws.max_row + 1)]
+    assert totals == sorted(totals, reverse=True)

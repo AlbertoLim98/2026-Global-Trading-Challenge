@@ -23,6 +23,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import data
+import export
 import metrics
 
 CACHE_TTL = 600  # secondi
@@ -82,6 +83,18 @@ def make_handler(state: State) -> type[BaseHTTPRequestHandler]:
                     self.wfile.write(body)
                 elif url.path == "/api/sectors":
                     self._json(state.sectors(refresh="refresh" in q))
+                elif url.path == "/api/export.xlsx":
+                    body = export.build(state.sectors())
+                    name = f"settori_{time.strftime('%Y-%m-%d')}.xlsx"
+                    self.send_response(200)
+                    self.send_header(
+                        "Content-Type",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                    self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
                 elif url.path == "/api/history":
                     sym = (q.get("symbol") or [""])[0].upper()
                     bars = state.bars()
@@ -96,7 +109,7 @@ def make_handler(state: State) -> type[BaseHTTPRequestHandler]:
                         self._json(data.account_snapshot())
                 else:
                     self._json({"error": "non trovato"}, 404)
-            except Exception as e:  # mostra l'errore nell'interfaccia invece di chiudere
+            except Exception as e:  # noqa: BLE001 - mostra l'errore nell'interfaccia invece di chiudere
                 self._json({"error": f"{type(e).__name__}: {e}"}, 500)
 
         def log_message(self, *a: object) -> None:

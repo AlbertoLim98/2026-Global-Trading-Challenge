@@ -41,7 +41,7 @@ svg{width:100%;height:auto;display:block}
 <header>
   <h1>Sector Lab <span class="badge" id="meta"></span></h1>
   <div class="tabs"><button id="t-s" class="on">Settori</button><button id="t-p">Portafoglio paper</button></div>
-  <button class="btn" id="csv">Scarica CSV</button>
+  <a class="btn" id="xlsx" href="/api/export.xlsx" download style="text-decoration:none">Scarica Excel</a>
   <button class="btn" id="refresh">Aggiorna dati</button>
 </header>
 <main>
@@ -164,24 +164,6 @@ async function loadAcct(){
 $('#t-s').onclick=()=>{$('#v-s').hidden=false;$('#v-p').hidden=true;$('#t-s').classList.add('on');$('#t-p').classList.remove('on')};
 $('#t-p').onclick=()=>{$('#v-s').hidden=true;$('#v-p').hidden=false;$('#t-p').classList.add('on');$('#t-s').classList.remove('on');loadAcct()};
 
-function downloadCsv(){
-  if(!DATA)return;
-  const P=v=>v==null?'':(v*100).toFixed(2).replace('.',','),N=(v,d=2)=>v==null?'':v.toFixed(d).replace('.',',');
-  const cols=[['Settore',r=>r.name],['ETF',r=>r.symbol],['Prezzo',r=>N(r.price)],['Ultimo dato',r=>r.last_date],
-   ['Stato trend',r=>r.trend_label],['vs SMA50 %',r=>P(r.px_vs_sma50)],['vs SMA200 %',r=>P(r.px_vs_sma200)],['SMA50 vs SMA200 %',r=>P(r.sma50_vs_sma200)],
-   ['Score trend',r=>N(r.scores.trend,1)],
-   ['Rend. 1m %',r=>P(r.ret_1m)],['Rend. 3m %',r=>P(r.ret_3m)],['Rend. 6m %',r=>P(r.ret_6m)],['Rend. 12m %',r=>P(r.ret_12m)],
-   ['RSI 14',r=>N(r.rsi14,1)],['RS 3m vs SPY %',r=>P(r.rs_3m)],['RS 6m vs SPY %',r=>P(r.rs_6m)],['Score momentum',r=>N(r.scores.momentum,1)],
-   ['Vol 20g/90g',r=>N(r.vol_ratio_20_90)],['Volume su/giu',r=>N(r.updown_volume)],['Controvalore medio 20g',r=>N(r.dollar_volume_20d,0)],['Score volume',r=>N(r.scores.volume,1)],
-   ['Volatilita 20g %',r=>P(r.vol_20d)],['Volatilita 60g %',r=>P(r.vol_60d)],['ATR %',r=>P(r.atr_pct)],['Da max 52w %',r=>P(r.drawdown_52w)],['Score volatilita',r=>N(r.scores.volatility,1)],
-   ['Score totale',r=>N(r.scores.total,1)]];
-  const q=v=>/[;"\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;
-  const lines=[cols.map(c=>q(c[0])).join(';'),...DATA.sectors.map(r=>cols.map(c=>q(String(c[1](r)))).join(';'))];
-  const blob=new Blob(['\ufeff'+lines.join('\r\n')],{type:'text/csv;charset=utf-8'});
-  const a=document.createElement('a');a.href=URL.createObjectURL(blob);
-  a.download=`settori_${DATA.updated.slice(0,10)}.csv`;a.click();URL.revokeObjectURL(a.href);
-}
-$('#csv').onclick=downloadCsv;
 $('#refresh').onclick=()=>load(true);
 load(false);
 </script>
