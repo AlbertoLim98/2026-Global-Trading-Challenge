@@ -142,13 +142,11 @@ righe di quelle esecuzioni (vince l'ultima assegnazione). Corregge l'etichetta, 
 eseguito sul conto.
 
 ```bash
-uv run python sector_lab/journal_tool.py list    --db sector_lab/journal.db   # esecuzioni, ora (UTC), modalità registrata
-uv run python sector_lab/journal_tool.py relabel --db sector_lab/journal.db --hour 17 \
-    --portfolio "Portafoglio 17" --strategy beta --dry-run                       # anteprima
-uv run python sector_lab/journal_tool.py relabel --db sector_lab/journal.db --hour 17 \
-    --portfolio "Portafoglio 17" --strategy beta
-uv run python sector_lab/journal_tool.py relabel --db sector_lab/journal.db --hour 18 \
-    --portfolio "Portafoglio 18" --strategy quality
+# una riga per comando (su PowerShell il carattere \ per andare a capo non funziona: usa una riga sola)
+uv run python sector_lab/journal_tool.py list --db sector_lab/journal.db
+uv run python sector_lab/journal_tool.py relabel --db sector_lab/journal.db --hour 17 --portfolio "Portafoglio 17" --strategy beta --dry-run
+uv run python sector_lab/journal_tool.py relabel --db sector_lab/journal.db --hour 17 --portfolio "Portafoglio 17" --strategy beta
+uv run python sector_lab/journal_tool.py relabel --db sector_lab/journal.db --hour 18 --portfolio "Portafoglio 18" --strategy quality
 ```
 
 Selezione: `--hour` (ora di avvio di esecuzioni **già registrate**, letta in UTC come nell'Excel; con
