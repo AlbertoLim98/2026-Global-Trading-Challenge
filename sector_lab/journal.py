@@ -35,7 +35,7 @@ CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
 BEGIN SELECT RAISE(ABORT, 'journal append-only'); END;
 """
 
-STRATEGY_LABEL = {"beta": "Alto beta", "quality": "Qualità"}
+STRATEGY_LABEL = {"beta": "Alto beta", "quality": "Qualità", "short": "Breve termine (1 gg)"}
 RELABEL = "RELABEL"  # evento di riclassificazione: il registro resta in sola aggiunta
 
 # stati "attivi": ordine in corso oppure fallito e ancora da gestire
@@ -284,6 +284,19 @@ class Journal:
                     "n_orders": p.get("n_proposals", 0),
                 }
             )
+        return out
+
+    def entry_stop_mults(self) -> dict[str, float]:
+        """Moltiplicatore ATR dello stop fissato all'acquisto: ultimo acquisto eseguito di ogni titolo."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT data FROM proposals WHERE status IN ('filled', 'submitted') ORDER BY updated ASC"
+            ).fetchall()
+        out: dict[str, float] = {}
+        for r in rows:
+            d = json.loads(r["data"])
+            if d.get("kind") == "BUY" and d.get("stop_mult"):
+                out[d["symbol"]] = float(d["stop_mult"])
         return out
 
     def opening(self) -> dict | None:

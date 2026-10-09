@@ -49,7 +49,7 @@ svg{width:100%;height:auto;display:block}
 <body>
 <header>
   <h1>Sector Lab <span class="k" id="pf" hidden style="background:var(--acc);margin-left:8px"></span></h1>
-  <div class="tabs"><button id="t-s" class="on">Settori</button><button id="t-a">Aziende</button><button id="t-r">Ribilancio</button><button id="t-j">Journal</button><button id="t-p">Portafoglio paper</button></div>
+  <div class="tabs"><button id="t-s" class="on">Settori</button><button id="t-a">Aziende</button><button id="t-b">1 giorno</button><button id="t-r">Ribilancio</button><button id="t-j">Journal</button><button id="t-p">Portafoglio paper</button></div>
   <a class="btn" id="xlsx" href="/api/export.xlsx" download style="text-decoration:none">Scarica Excel</a>
   <button class="btn" id="refresh">Aggiorna dati</button>
 </header>
@@ -83,10 +83,24 @@ svg{width:100%;height:auto;display:block}
       Punteggi 0-100 = percentile dentro il settore. <b>Peso settore</b> = quota del titolo in proporzione al suo punteggio, senza tetti. <b>Score indice</b> = punteggio dell'ETF del settore (tabella Settori). <b>Peso portafoglio</b> = peso reale nel ribilanciamento: il punteggio del titolo è valutato insieme ai punteggi degli indici di tutti gli altri settori (peso del settore ∝ punteggio dell'indice, poi quota del titolo nel settore) (tetto 10% per titolo, 97% investito). Non è un segnale operativo.</p>
       <p class="note" id="a-beta-note" hidden><b>Strategia alto beta:</b> si considerano solo i titoli con trend relativo non ribassista e TWRR ponderato positivo (che stanno battendo ACWI); tra questi si scelgono i 10 con beta a 1 anno più alto e si pesano in proporzione al punteggio (il beta sceglie i titoli, il peso segue il punteggio, senza tetto per titolo). Un beta alto amplifica guadagni e perdite rispetto al mercato.</p></div>
   </section>
+  <section id="v-b" hidden>
+    <div class="card" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+      <button class="btn" id="b-refresh">Aggiorna punteggi</button>
+      <button class="btn" id="b-ic">Valida gli indicatori sullo storico</button>
+      <a class="btn" id="b-x" href="/api/short.xlsx" download style="text-decoration:none">Scarica Excel</a>
+      <a class="btn" href="/api/short.xlsx?ic=1" download style="text-decoration:none">Excel con validazione</a>
+      <span class="badge" id="b-meta"></span>
+    </div>
+    <div class="card" id="b-ctx" hidden></div>
+    <div class="card wrap"><h3 style="margin-top:0">Migliori candidati a 1 giorno</h3><table id="b-tbl" style="min-width:1000px"></table>
+      <p class="note">Score di breve periodo (0-100, percentile tra i titoli dello stesso giorno), media di 7 pilastri: <b>RSI</b> a 2-3 giorni con filtro di trend (ipervenduto sopra la media a 50 giorni), <b>Rendimento/ATR</b> di ieri e della settimana (ritorno alla media), <b>Volume</b> relativo di ieri con la direzione, <b>Candela</b> (chiusura nel range e gap notturno), <b>Forza relativa</b> a 3 giorni rispetto al settore e a SPY, <b>Contesto</b> di mercato (beta alto se SPY è rialzista, basso se ribassista), <b>Volatilità</b> (espansione penalizzata).
+      Uscita: stop a <b>1,5 ATR</b> se il titolo è sopra la media a 50 giorni all'acquisto (rialzista), <b>2,5 ATR</b> se è sotto (ribassista). I segni degli indicatori sono ipotesi: usa <b>Valida gli indicatori</b> per misurarli sullo storico. I dati sono quelli dell'ultima seduta completa.</p></div>
+    <div class="card wrap" id="b-ic-card" hidden></div>
+  </section>
   <section id="v-r" hidden>
     <div class="card err" id="r-alert" hidden></div>
     <div class="card" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
-      <label>Modalità <select id="r-mode"><option value="quality">Qualità (prudente)</option><option value="beta">Alto beta</option></select></label>
+      <label>Modalità <select id="r-mode"><option value="quality">Qualità (prudente)</option><option value="beta">Alto beta</option><option value="short">Breve termine (1 gg)</option></select></label>
       <label>Capitale $ <input id="r-cap" type="number" value="1000000" step="10000" min="10000" style="width:120px"></label>
       <button class="btn primary" id="r-run">Avvia ribilanciamento giornaliero (invia gli ordini)</button>
       <button class="btn" id="r-stops">Controlla stop ATR (vende)</button>
@@ -312,7 +326,7 @@ async function loadJournal(){
      +d.events.map(e=>`<tr style="cursor:default"><td>${e.id}</td><td>${new Date(e.ts).toLocaleString('it-IT')}</td><td>${e.portfolio||'–'}</td><td>${e.strategy?STRAT[e.strategy]||e.strategy:'–'}${e.relabeled?' <span class="badge">corretta</span>':''}</td><td>${KIND_LABEL[e.kind]||e.kind}</td><td style="text-align:left;white-space:normal">${e.summary}</td></tr>`).join('')+'</tbody>';
   }catch(e){err(e)}
 }
-const STRAT={beta:'Alto beta',quality:'Qualità'};
+const STRAT={beta:'Alto beta',quality:'Qualità',short:'Breve termine (1 gg)'};
 async function loadInfo(){
   try{
     const i=await api('/api/info');
@@ -324,6 +338,38 @@ async function loadInfo(){
   }catch(e){/* info non essenziale */}
 }
 $('#r-run').onclick=runRebalance;$('#r-stops').onclick=checkStops;$('#j-refresh').onclick=loadJournal;$('#j-kind').onchange=loadJournal;
+
+const PIL=['rsi','move','volume','candle','relstrength','context','volatility'];
+const PILN={rsi:'RSI 2-3g',move:'Rend./ATR',volume:'Volume',candle:'Candela',relstrength:'Forza rel.',context:'Contesto',volatility:'Volatilità'};
+async function loadShort(refresh){
+  $('#b-meta').textContent='calcolo in corso… (scarico lo storico di tutto l\'universo)';
+  try{
+    const d=await api('/api/short'+(refresh?'?refresh=1':''));
+    const c=d.context;
+    $('#b-meta').textContent=`dati al ${c.date} · ${d.n_analyzed}/${d.n_universe} titoli analizzati · feed ${d.feed}`;
+    $('#b-ctx').hidden=false;
+    $('#b-ctx').innerHTML=`<b>Contesto di mercato:</b> <span class="lab ${c.state}">${c.state}</span> · SPY ${pct(c.spy_vs_sma50,1)} dalla media a 50g · 1g ${pct(c.spy_ret1,2)} · 5g ${pct(c.spy_ret5,2)} · RSI(2) ${num(c.spy_rsi2,0)}
+      <br><span class="badge">Ampiezza: ${pct(c.breadth_above_sma50,0)} dei titoli sopra la media a 50g · ${pct(c.breadth_up_yesterday,0)} in rialzo ieri · Volatilità: ${c.vol_regime} (5g/20g ${num(c.vol_ratio_5_20)})</span>`;
+    $('#b-tbl').innerHTML='<thead><tr><th>Pos.</th><th style="text-align:left">Titolo</th><th>Prezzo</th><th>ATR</th><th>Trend</th><th>Stop</th>'+PIL.map(p=>`<th>${PILN[p]}</th>`).join('')+'<th>Totale</th></tr></thead><tbody>'
+      +d.rows.slice(0,40).map(r=>`<tr style="cursor:default"><td>${r.rank}</td><td style="text-align:left"><b>${r.symbol}</b> <span class="badge">${r.name} · ${r.sector||''}</span></td><td>${num(r.price)}</td><td>${num(r.atr)}</td><td><span class="lab ${r.trend_label}">${r.trend_label}</span></td><td>${num(r.stop_mult,1)} ATR</td>`
+        +PIL.map(p=>`<td>${pill(r.pillars[p])}</td>`).join('')+`<td>${pill(r.total)}</td></tr>`).join('')+'</tbody>';
+  }catch(e){$('#b-meta').textContent='';err(e)}
+}
+async function loadShortIc(){
+  const btn=$('#b-ic');btn.disabled=true;btn.textContent='Calcolo in corso…';
+  try{
+    const d=await api('/api/short/ic');const st=d.strategy;
+    const f=v=>v==null||Number.isNaN(v)?'–':v;
+    $('#b-ic-card').hidden=false;
+    $('#b-ic-card').innerHTML=`<h3 style="margin-top:0">Validazione storica <span class="badge">dal ${d.from} al ${d.to} · ${st.n_days} giorni</span></h3>
+      <p class="note" style="margin-top:0">Per ogni giorno si correla ogni indicatore con il rendimento del giorno dopo (chiusura-chiusura). <b>IC</b> = correlazione di rango media (positiva = l'indicatore prevede bene; il segno atteso è positivo), <b>t</b> = quanto è distinguibile dal caso (|t| &gt; 2 è la soglia usuale), <b>Netto beta</b> toglie il movimento dovuto al mercato.</p>
+      <table style="min-width:800px"><thead><tr><th style="text-align:left">Indicatore</th><th>IC grezzo</th><th>IC netto beta</th><th>t</th><th>% giorni IC&gt;0</th><th>Spread top-bottom</th><th style="text-align:left">Verdetto</th></tr></thead><tbody>`
+      +d.rows.map(r=>`<tr style="cursor:default"><td style="text-align:left">${r.indicatore.replace('componente:','').replace('pilastro:','Pilastro ')}</td><td>${num(r.grezzo.ic_mean,3)}</td><td class="${cls(r.netto_beta.ic_mean)}"><b>${num(r.netto_beta.ic_mean,3)}</b></td><td class="${Math.abs(r.netto_beta.ic_t)>=2?(r.netto_beta.ic_t>0?'up':'down'):''}">${num(r.netto_beta.ic_t,1)}</td><td>${pct(r.netto_beta.ic_hit,0)}</td><td class="${cls(r.netto_beta.spread_bps)}">${num(r.netto_beta.spread_bps,1)} bps</td><td style="text-align:left">${r.verdetto}</td></tr>`).join('')
+      +`</tbody></table><p class="note"><b>Strategia:</b> i ${st.top_n} migliori per score totale ogni giorno rendono in media <b class="${cls(st.excess_bps_day)}">${num(st.excess_bps_day,1)} bps/giorno</b> rispetto all'universo (t=${num(st.excess_t,1)}); ricambio giornaliero ${pct(st.turnover,0)}; dopo ${st.cost_bps_per_side} bps di costo per lato: <b class="${cls(st.net_bps_day)}">${num(st.net_bps_day,1)} bps/giorno</b>. Il segnale è la differenza di score, non il beta: un IC vicino a zero o t sotto 2 significa che l'indicatore non è distinguibile dal caso su questo periodo.</p>`;
+  }catch(e){err(e)}
+  btn.disabled=false;btn.textContent='Valida gli indicatori sullo storico';
+}
+$('#b-refresh').onclick=()=>loadShort(true);$('#b-ic').onclick=loadShortIc;
 let aInit=false;
 async function loadStocks(refresh){
   const sec=$('#a-sec').value,mode=$('#a-mode').value;
@@ -343,10 +389,11 @@ async function loadStocks(refresh){
   }catch(e){$('#a-meta').textContent='';err(e)}
 }
 function showTab(t){
-  for(const k of ['s','a','r','j','p']){$('#v-'+k).hidden=k!==t;$('#t-'+k).classList.toggle('on',k===t)}
+  for(const k of ['s','a','b','r','j','p']){$('#v-'+k).hidden=k!==t;$('#t-'+k).classList.toggle('on',k===t)}
   clearInterval(rTimer);$('#msg').innerHTML='';
   if(t==='r'){loadTrades();rTimer=setInterval(loadTrades,30000)}
   if(t==='j')loadJournal();
+  if(t==='b'&&!$('#b-tbl').innerHTML)loadShort(false);
   if(t==='p')loadAcct();
   if(t==='a'){
     if(!aInit&&DATA){aInit=true;
@@ -356,7 +403,7 @@ function showTab(t){
       loadStocks(false)}
   }
 }
-$('#t-s').onclick=()=>showTab('s');$('#t-a').onclick=()=>showTab('a');$('#t-r').onclick=()=>showTab('r');$('#t-j').onclick=()=>showTab('j');$('#t-p').onclick=()=>showTab('p');
+$('#t-s').onclick=()=>showTab('s');$('#t-a').onclick=()=>showTab('a');$('#t-b').onclick=()=>showTab('b');$('#t-r').onclick=()=>showTab('r');$('#t-j').onclick=()=>showTab('j');$('#t-p').onclick=()=>showTab('p');
 $('#refresh').onclick=()=>load(true);
 load(false);loadInfo();
 </script>

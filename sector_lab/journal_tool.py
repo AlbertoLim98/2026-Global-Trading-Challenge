@@ -74,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--run-id", action="append", default=[], help="esecuzione precisa (ripetibile)")
     ap.add_argument("--all", action="store_true", help="assegna tutte le esecuzioni del journal")
     ap.add_argument("--portfolio", help="nome del portafoglio da assegnare")
-    ap.add_argument("--strategy", choices=sorted(STRATEGY_LABEL), help="beta o quality")
+    ap.add_argument("--strategy", choices=sorted(STRATEGY_LABEL), help="beta, quality o short")
     ap.add_argument("--reason", default="correzione etichette", help="nota registrata nell'evento")
     ap.add_argument("--dry-run", action="store_true", help="mostra cosa cambierebbe senza scrivere")
     a = ap.parse_args(argv)
@@ -103,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(_fmt(chosen, tz))
     verb = "verrebbero assegnate" if a.dry_run else "assegnate"
-    print(f"\\n{len(chosen)} esecuzioni {verb} a {a.portfolio} / {STRATEGY_LABEL[a.strategy]}")
+    print(f"\n{len(chosen)} esecuzioni {verb} a {a.portfolio} / {STRATEGY_LABEL[a.strategy]}")
     if not a.dry_run:
         j.relabel([r["run_id"] for r in chosen], a.portfolio, a.strategy, a.reason)
     return 0

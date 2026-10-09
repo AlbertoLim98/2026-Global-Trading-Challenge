@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 import data
 import metrics
 import portfolio
+import shortterm
 from journal import Journal, now
 
 NY = ZoneInfo("America/New_York")
@@ -61,16 +62,34 @@ class Desk:
     def _positions(self) -> dict[str, dict]:
         return {p["symbol"]: p for p in self.broker.positions() if p["qty"] > 0}
 
-    def _atrs(self, symbols: list[str]) -> dict[str, float]:
+    def _stop_data(self, symbols: list[str]) -> tuple[dict[str, float], dict[str, bool]]:
+        """ATR(14) e trend (prezzo sopra la media a 50 giorni) di ogni titolo, dai dati giornalieri."""
         if not symbols:
-            return {}
-        bars = self.state.fetch_bars(symbols)
-        out = {}
-        for s, df in bars.items():
+            return {}, {}
+        atrs: dict[str, float] = {}
+        bull: dict[str, bool] = {}
+        for s, df in self.state.fetch_bars(symbols).items():
             v = metrics.atr(df).iloc[-1]
             if not math.isnan(v):
-                out[s] = float(v)
-        return out
+                atrs[s] = float(v)
+            if len(df) >= shortterm.SMA_N:
+                bull[s] = bool(df["close"].iloc[-1] > df["close"].tail(shortterm.SMA_N).mean())
+        return atrs, bull
+
+    def _atrs(self, symbols: list[str]) -> dict[str, float]:
+        return self._stop_data(symbols)[0]
+
+    def _strategy(self) -> str:
+        """Strategia in uso: quella fissa del portafoglio, altrimenti quella dell'ultima riallocazione."""
+        if self.strategy:
+            return self.strategy
+        runs = self.journal.runs()
+        return (runs[-1]["strategy"] if runs else None) or "quality"
+
+    def _short_stops(self, symbols: list[str], bull: dict[str, bool]) -> dict[str, float]:
+        """Stop per titolo della strategia a 1 giorno: quello fissato all'acquisto, altrimenti dal trend attuale."""
+        entry = self.journal.entry_stop_mults()
+        return {s: entry.get(s) or shortterm.stop_multiplier(bull.get(s, True)) for s in symbols}
 
     # --- ribilanciamento giornaliero ---------------------------------------------------------------
     def info(self) -> dict:
@@ -85,7 +104,7 @@ class Desk:
         mode = (
             self.strategy or mode
         )  # un portafoglio con strategia fissa ignora la scelta dell'utente
-        if mode not in ("quality", "beta"):
+        if mode not in ("quality", "beta", "short"):
             raise DeskError(f"modalità sconosciuta: {mode}")
         if capital < 10_000:
             raise DeskError("capitale troppo basso")
@@ -101,19 +120,28 @@ class Desk:
         run_id = now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
 
         tradable = self.state.tradable(refresh=True)
-        sectors = self.state.sectors(refresh=True)
-        by_etf = {
-            etf: self.state.stock_ranking(etf, refresh=True, mode=mode) for etf in data.SECTORS
-        }
         positions = self._positions()
         held_managed = [s for s in positions if s in self.managed]
-        atrs = self._atrs(held_managed)
-        tg = portfolio.build_targets(sectors["sectors"], by_etf, p)
+        atrs, bull = self._stop_data(held_managed)
+        if mode == "short":
+            view = self.state.short_view(refresh=True)
+            sectors = {"sectors": [], "feed": view["feed"]}
+            by_etf: dict[str, dict] = {}
+            tg = portfolio.build_targets_short(view["rows"], p)
+            stop_mults = self._short_stops(held_managed, bull)
+        else:
+            view = None
+            sectors = self.state.sectors(refresh=True)
+            by_etf = {
+                etf: self.state.stock_ranking(etf, refresh=True, mode=mode) for etf in data.SECTORS
+            }
+            tg = portfolio.build_targets(sectors["sectors"], by_etf, p)
+            stop_mults = None
         need = sorted(set(tg["targets"]) | set(held_managed))
         prices = self.broker.latest_prices(need) if need else {}
         acct = self.broker.account()
         res = portfolio.build_proposals(
-            tg["targets"], positions, prices, atrs, self.managed, acct["cash"], p
+            tg["targets"], positions, prices, atrs, self.managed, acct["cash"], p, stop_mults
         )
         res["notes"] = [*tg["notes"], *res["notes"]]
         if tradable is not None:
@@ -141,6 +169,8 @@ class Desk:
                 "sector_table": [_slim_sector(r) for r in sectors["sectors"]],
                 "stock_tables": {k: [_slim_stock(r) for r in v["top"]] for k, v in by_etf.items()},
                 "sector_budgets": tg["sectors"],
+                "short_context": view["context"] if view else None,
+                "short_table": [_slim_short(r) for r in view["rows"][:40]] if view else None,
                 "targets": list(tg["targets"].values()),
                 "n_proposals": len(res["proposals"]),
                 "notes": res["notes"],
@@ -167,15 +197,17 @@ class Desk:
     def stop_check(self) -> dict:
         self.refresh_orders()
         positions = {s: x for s, x in self._positions().items() if s in self.managed}
-        atrs = self._atrs(list(positions))
+        atrs, bull = self._stop_data(list(positions))
         p = portfolio.Params()
+        mults = self._short_stops(list(positions), bull) if self._strategy() == "short" else {}
         active = {
             x["symbol"] for x in self.journal.proposals(("submitted",)) if x["kind"] == "STOP"
         }
         run_id = now().strftime("%Y%m%d-%H%M%S-stop")
         new = []
         for sym, pos in positions.items():
-            loss = portfolio.stop_hit(pos, atrs.get(sym), p.atr_stop_mult)
+            mult = mults.get(sym, p.atr_stop_mult)
+            loss = portfolio.stop_hit(pos, atrs.get(sym), mult)
             if loss is None or sym in active:
                 continue
             info = self.managed[sym]
@@ -184,8 +216,9 @@ class Desk:
                 portfolio._proposal(
                     "STOP", "sell", sym, info["name"], info["sector"], pos["qty"], pos["price"],
                     f"Perdita {loss:.2f}$/azione ({loss / pos['avg_entry']:.1%}) > "
-                    f"{p.atr_stop_mult:g} ATR ({atr:.2f}$): vendita per stop",
+                    f"{mult:g} ATR ({atr:.2f}$): vendita per stop",
                     atr=atr, loss_per_share=loss, avg_entry=pos["avg_entry"],
+                    stop_mult=mult,
                 )
             )  # fmt: skip
         self.journal.log("STOP_CHECK", {"n_positions": len(positions), "n_new": len(new)}, run_id)
@@ -472,6 +505,25 @@ def _slim_sector(r: dict) -> dict:
         "rs_3m", "vol_ratio_20_90", "updown_volume", "vol_60d", "atr_pct", "drawdown_52w", "scores",
     )  # fmt: skip
     return {k: r.get(k) for k in keys}
+
+
+def _slim_short(r: dict) -> dict:
+    return {
+        k: r.get(k)
+        for k in (
+            "rank",
+            "symbol",
+            "name",
+            "sector",
+            "price",
+            "atr",
+            "beta",
+            "trend_label",
+            "stop_mult",
+            "total",
+            "pillars",
+        )
+    }
 
 
 def _slim_stock(r: dict) -> dict:

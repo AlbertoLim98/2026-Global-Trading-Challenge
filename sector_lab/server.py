@@ -30,6 +30,7 @@ import export
 import journal as journal_mod
 import metrics
 import portfolio
+import shortterm
 import stocks
 
 CACHE_TTL = 600  # secondi
@@ -41,6 +42,8 @@ class State:
         self._bars: dict = {}
         self._at = 0.0
         self._stocks: dict[str, tuple[float, dict]] = {}
+        self._short: tuple[float, dict] | None = None
+        self._short_ic: tuple[float, dict] | None = None
         self.tradable_fn = None  # broker.tradable_symbols (None in demo: nessun filtro)
         self._tradable: tuple[float, set[str] | None] | None = None
         self._lock = threading.Lock()
@@ -63,6 +66,56 @@ class State:
         with self._lock:
             self._tradable = (time.time(), syms)
         return syms
+
+    def short_view(self, refresh: bool = False) -> dict:
+        """Score di breve periodo (1 giorno) di tutto l'universo negoziabile, con il contesto di mercato."""
+        with self._lock:
+            if self._short and not refresh and time.time() - self._short[0] < CACHE_TTL:
+                return self._short[1]
+        uni = data.load_universe()
+        tradable = self.tradable()
+        if tradable is not None:
+            uni = uni[uni.ticker.isin(tradable)]
+        syms = list(uni.ticker)
+        bars = self.fetch_bars([*syms, data.BENCHMARK, *data.SECTORS])
+        bars = {
+            k: shortterm.drop_incomplete(v) for k, v in bars.items()
+        }  # niente barra di oggi incompleta
+        if data.BENCHMARK not in bars:
+            raise RuntimeError(f"nessun dato per {data.BENCHMARK}")
+        sector_of = dict(zip(uni.ticker, uni.sector_etf, strict=True))
+        panel = shortterm.build_panel(
+            {s: bars[s] for s in syms if s in bars},
+            bars[data.BENCHMARK],
+            sector_of,
+            {e: bars[e] for e in data.SECTORS if e in bars},
+        )
+        rows = shortterm.latest_table(
+            panel, dict(zip(uni.ticker, uni.name, strict=True)), sector_of
+        )
+        view = {
+            "context": shortterm.market_context(panel),
+            "rows": rows,
+            "n_analyzed": len(rows),
+            "n_universe": len(syms),
+            "feed": "demo" if self.demo else self.feed,
+            "pillars": shortterm.PILLAR_LABEL,
+            "notes": shortterm.COMPONENT_NOTES,
+            "_panel": panel,  # per la validazione storica (non serializzato)
+        }
+        with self._lock:
+            self._short = (time.time(), view)
+        return view
+
+    def short_ic(self, refresh: bool = False) -> dict:
+        """Validazione storica degli indicatori di breve periodo (correlazione col rendimento del giorno dopo)."""
+        with self._lock:
+            if self._short_ic and not refresh and time.time() - self._short_ic[0] < 3600:
+                return self._short_ic[1]
+        rep = shortterm.ic_report(self.short_view()["_panel"])
+        with self._lock:
+            self._short_ic = (time.time(), rep)
+        return rep
 
     def portfolio_weights(self, mode: str, capital: float = 1_000_000.0) -> dict:
         """Pesi reali dell'algoritmo di ribilanciamento: il titolo è valutato insieme agli altri settori."""
@@ -265,6 +318,21 @@ def make_handler(state: State, desk: desk_mod.Desk, port: int) -> type[BaseHTTPR
                     acc = desk.broker.account()
                     pos = desk.broker.positions()
                     self._json({**acc, "positions": pos, "broker": desk.broker.name})
+                elif url.path == "/api/short":
+                    v = state.short_view("refresh" in q)
+                    self._json(
+                        {k: x for k, x in v.items() if k not in ("_panel", "rows")}
+                        | {"rows": v["rows"][:60]}
+                        | state.meta()
+                    )
+                elif url.path == "/api/short/ic":
+                    self._json(state.short_ic("refresh" in q))
+                elif url.path == "/api/short.xlsx":
+                    v = state.short_view()
+                    ic = state.short_ic() if "ic" in q else None
+                    self._xlsx(
+                        export.build_short(v, ic), f"breve_termine_{time.strftime('%Y-%m-%d')}.xlsx"
+                    )
                 elif url.path == "/api/info":
                     self._json(desk.info())
                 elif url.path == "/api/portfolio":

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import math
 from collections.abc import Callable
 from typing import Any
 
@@ -260,4 +261,104 @@ def build_journal(events: list[dict]) -> bytes:
     _sheet(ws, cols, sorted(events, key=lambda e: e["id"]), freeze="A3")
     for col, width in {"B": 22, "C": 18, "D": 12, "F": 24, "G": 14, "H": 90, "I": 60}.items():
         ws.column_dimensions[col].width = width
+    return _save(wb)
+
+
+def build_short(view: dict, ic: dict | None = None) -> bytes:
+    """Candidati a 1 giorno (score e pilastri), contesto di mercato e, se calcolata, la validazione storica."""
+    import shortterm
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Candidati 1 giorno"
+    cols: list[Col] = [
+        ("", "Pos.", lambda r: r["rank"], "0"),
+        ("", "Ticker", lambda r: r["symbol"], None),
+        ("", "Azienda", lambda r: r["name"], None),
+        ("", "Settore", lambda r: r["sector"], None),
+        ("", "Prezzo", lambda r: r["price"], NUM),
+        ("", "ATR(14)", lambda r: r["atr"], NUM),
+        ("", "Beta 60g vs SPY", lambda r: r["beta"], NUM),
+        ("Stop", "Trend", lambda r: r["trend_label"], None),
+        ("Stop", "Moltiplicatore ATR", lambda r: r["stop_mult"], "0.0"),
+        *[
+            ("Pilastri", label, (lambda r, p=p: r["pillars"][p]), "score")
+            for p, label in shortterm.PILLAR_LABEL.items()
+        ],
+        ("", "Score totale", lambda r: r["total"], "score"),
+    ]
+    _sheet(ws, cols, view["rows"], freeze="D3")
+    ctx = view["context"]
+    info = wb.create_sheet("Contesto e note")
+    lines = [
+        f"Dati al {ctx['date']} (ultima seduta completa). Feed: {view['feed']}",
+        (
+            f"Mercato: {ctx['state']} (SPY {ctx['spy_vs_sma50']:+.1%} dalla media a 50 giorni), "
+            f"1g {ctx['spy_ret1']:+.2%}, 5g {ctx['spy_ret5']:+.2%}, RSI(2) {ctx['spy_rsi2']:.0f}"
+        ),
+        (
+            f"Ampiezza: {ctx['breadth_above_sma50']:.0%} dei titoli sopra la media a 50 giorni, "
+            f"{ctx['breadth_up_yesterday']:.0%} in rialzo ieri. Volatilità: {ctx['vol_regime']} "
+            f"(rapporto 5g/20g {ctx['vol_ratio_5_20']:.2f})"
+        ),
+        "",
+        "Indicatori (segno ipotizzato, da verificare con la validazione storica):",
+        *[f"  {k}: {v}" for k, v in shortterm.COMPONENT_NOTES.items()],
+        "",
+        "Uscita: stop a 1,5 ATR se il titolo è sopra la media a 50 giorni all'acquisto, 2,5 ATR se è sotto.",
+        "Score = percentile 0-100 tra i titoli dello stesso giorno; totale = media dei 7 pilastri.",
+    ]
+    for i, t in enumerate(lines, 1):
+        info.cell(i, 1, t)
+    info.column_dimensions["A"].width = 130
+    if ic:
+        w = wb.create_sheet("Validazione storica")
+        hdr = [
+            "Indicatore",
+            "Versione",
+            "Giorni",
+            "IC medio",
+            "t",
+            "% giorni IC>0",
+            "Spread top-bottom (bps)",
+            "Verdetto",
+        ]
+        for j, h in enumerate(hdr, 1):
+            c = w.cell(1, j, h)
+            c.font = Font(bold=True)
+        r = 2
+        for row in ic["rows"]:
+            for label, key in (
+                ("rendimento grezzo", "grezzo"),
+                ("al netto del beta", "netto_beta"),
+            ):
+                m = row[key]
+                vals = [
+                    row["indicatore"],
+                    label,
+                    m["n_days"],
+                    m["ic_mean"],
+                    m["ic_t"],
+                    m["ic_hit"],
+                    m["spread_bps"],
+                    row["verdetto"] if key == "netto_beta" else "",
+                ]
+                for j, v in enumerate(vals, 1):
+                    w.cell(r, j, None if isinstance(v, float) and math.isnan(v) else v)
+                r += 1
+        st = ic["strategy"]
+        w.cell(
+            r + 1,
+            1,
+            f"Strategia: i {st['top_n']} migliori per score totale ogni giorno, dal {ic['from']} al {ic['to']}",
+        )
+        w.cell(
+            r + 2,
+            1,
+            f"Extra-rendimento medio vs universo: {st['excess_bps_day']:.1f} bps/giorno (t={st['excess_t']:.1f}); "
+            f"ricambio giornaliero {st['turnover']:.0%}; al netto di {st['cost_bps_per_side']:.0f} bps per lato: {st['net_bps_day']:.1f} bps/giorno",
+        )
+        w.column_dimensions["A"].width = 30
+        w.column_dimensions["B"].width = 20
+        w.column_dimensions["H"].width = 28
     return _save(wb)

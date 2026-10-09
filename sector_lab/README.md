@@ -92,11 +92,40 @@ La scheda **Portafoglio paper** mostra la composizione (titoli con peso, P/L di 
 ripartizione per settore), il guadagno/perdita dall'ultima riallocazione, per ogni riallocazione (patrimonio al via di una e della
 successiva) e da apertura portafoglio (patrimonio al primo ribilanciamento registrato) e, in un elenco a parte, i movimenti eseguiti oggi (giorno di borsa di New York).
 
+### Strategia a 1 giorno (scheda "1 giorno")
+
+Terza strategia (`--strategy short`, o "Breve termine" nel selettore di Ribilancio) con uno **score di
+breve periodo** su tutto l'universo, media di 7 pilastri (percentile 0-100 tra i titoli dello stesso giorno):
+
+| Pilastro | Cosa misura (segno ipotizzato) |
+|---|---|
+| RSI 2-3g + trend | RSI a 2 e 3 giorni; conta solo sopra la media a 50 giorni (ipervenduto = punteggio alto), sotto è neutro |
+| Rendimento / ATR | rendimento di ieri e della settimana diviso per l'ATR (chi è sceso di più rimbalza) |
+| Volume + direzione | volume di ieri / media dei 20 giorni precedenti x segno del rendimento (continuazione) |
+| Candela | chiusura nel range del giorno (alta = continuazione) e gap notturno / ATR (il gap si chiude) |
+| Forza relativa | rendimento a 3 giorni di titolo meno settore (rientra) e di settore meno SPY (momentum) |
+| Contesto di mercato | beta a 60 giorni x (+1 se SPY sopra la media a 50 giorni, -1 se sotto) |
+| Regime di volatilità | -(ATR 5g / ATR 20g): l'espansione penalizza |
+
+Si tengono i **20 titoli** con lo score più alto (peso in proporzione, massimo 10% per titolo, 97% investito).
+Si usa l'ultima seduta completa (la barra di oggi non completa viene scartata).
+
+**Uscita:** stop a **1,5 ATR** se il titolo è rialzista (sopra la media a 50 giorni) all'acquisto, **2,5 ATR**
+se ribassista; il moltiplicatore è fissato all'acquisto e salvato nel journal. Vale solo per questa strategia
+(Qualità e Alto beta restano a 1 ATR).
+
+I segni degli indicatori sono **ipotesi**. Il pulsante **Valida gli indicatori sullo storico** (e l'Excel con
+validazione) misura, su circa un anno di dati giornalieri, quanto ogni indicatore prevede il rendimento del
+giorno dopo (correlazione di rango media, t, % giorni positivi, spread tra il quinto più alto e più basso,
+anche al netto del beta) e quanto renderebbe tenere ogni giorno i 20 migliori, con costi. Un indicatore con
+t sotto 2 non è distinguibile dal caso; un t molto negativo suggerisce di invertire il segno (in
+`shortterm.py`, `build_panel`). Il calcolo è lo stesso del punteggio di oggi e non guarda mai al futuro.
+
 ### Due portafogli con strategie diverse
 
 Ogni portafoglio è un'istanza del programma con **conto Alpaca paper, journal e strategia propri**
 (le posizioni dei due portafogli non si mescolano). La strategia (`beta` = alto beta, `quality` =
-qualità) è fissa e compare nell'intestazione; ogni evento del journal ne porta nome e strategia.
+qualità, `short` = breve termine a 1 giorno) è fissa e compare nell'intestazione; ogni evento del journal ne porta nome e strategia.
 
 ```bash
 # ognuno con il proprio file di chiavi (stesse variabili di .env.example) e la propria porta

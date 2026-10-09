@@ -38,7 +38,10 @@ class Params:
     min_trade: float = 2_000.0
     drift_tolerance: float = 0.20
     atr_stop_mult: float = 1.0
-    mode: str = "quality"  # "quality" | "beta"
+    mode: str = "quality"  # "quality" | "beta" | "short"
+    short_n: int = (
+        20  # strategia a 1 giorno: quanti titoli tenere (i migliori per score di breve periodo)
+    )
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -204,6 +207,43 @@ def build_targets(
     return {"sectors": sectors, "targets": targets, "notes": notes}
 
 
+def build_targets_short(cands: list[dict], p: Params) -> dict:
+    """Strategia a 1 giorno: i `short_n` titoli con lo score di breve periodo più alto, peso in proporzione.
+
+    Nessuna struttura per settori: l'unico limite è `max_stock` del capitale per titolo; il 97% viene investito
+    se i titoli sono almeno 10. Ogni titolo porta lo stop (1,5 ATR se rialzista, 2,5 se ribassista) fissato
+    all'acquisto.
+    """
+    top = sorted(cands, key=lambda r: -r["total"])[: p.short_n]
+    invest = p.capital * (1 - p.cash_reserve)
+    alloc = allocate(
+        {r["symbol"]: max(r["total"], 1.0) for r in top}, invest, p.max_stock * p.capital
+    )
+    targets = {
+        r["symbol"]: {
+            "symbol": r["symbol"],
+            "name": r["name"],
+            "sector": r["sector"],
+            "value": alloc[r["symbol"]],
+            "price": r["price"],
+            "score": r["total"],
+            "beta": r.get("beta"),
+            "stop_mult": r["stop_mult"],
+            "trend_at_entry": r["trend_label"],
+            "tier": "breve termine",
+        }
+        for r in top
+        if r["symbol"] in alloc
+    }
+    notes = []
+    if sum(alloc.values()) < invest - 1.0:
+        notes.append(
+            f"Con {len(top)} titoli e tetto del {p.max_stock:.0%} si investe {sum(alloc.values()):,.0f}$ "
+            f"su {invest:,.0f}$: servono almeno {int(-(-invest // (p.max_stock * p.capital)))} titoli"
+        )
+    return {"sectors": [], "targets": targets, "notes": notes}
+
+
 def _proposal(
     kind: str,
     side: str,
@@ -247,6 +287,7 @@ def build_proposals(
     managed: dict[str, dict],
     cash: float,
     p: Params,
+    stop_mults: dict[str, float] | None = None,
 ) -> dict:
     """Proposte per portare il portafoglio sul target.
 
@@ -261,7 +302,10 @@ def build_proposals(
         if sym not in managed:
             continue
         info = managed[sym]
-        loss = stop_hit(pos, atrs.get(sym), p.atr_stop_mult)
+        mult = (stop_mults or {}).get(
+            sym, p.atr_stop_mult
+        )  # per titolo (strategia a 1 giorno) o fisso
+        loss = stop_hit(pos, atrs.get(sym), mult)
         if loss is not None:
             atr = atrs[sym]
             stopped.add(sym)
@@ -274,11 +318,12 @@ def build_proposals(
                     info["sector"],
                     pos["qty"],
                     pos["price"],
-                    f"Perdita {loss:.2f}$/azione ({loss / pos['avg_entry']:.1%}) > {p.atr_stop_mult:g} ATR "
+                    f"Perdita {loss:.2f}$/azione ({loss / pos['avg_entry']:.1%}) > {mult:g} ATR "
                     f"({atr:.2f}$): vendita immediata consigliata",
                     atr=atr,
                     loss_per_share=loss,
                     avg_entry=pos["avg_entry"],
+                    stop_mult=mult,
                 )
             )
 
@@ -332,6 +377,11 @@ def build_proposals(
                     + (f", punteggio {tgt['score']:.0f}" if tgt["score"] is not None else ""),
                     current_value=cur,
                     target_value=tgt["value"],
+                    **(
+                        {"stop_mult": tgt["stop_mult"], "trend_at_entry": tgt["trend_at_entry"]}
+                        if "stop_mult" in tgt
+                        else {}
+                    ),
                 )
             )
 
