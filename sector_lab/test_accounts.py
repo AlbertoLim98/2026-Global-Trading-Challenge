@@ -168,3 +168,70 @@ def test_split_overwrite_replaces_a_previous_attempt_but_never_the_source(tmp_pa
         and src.exists()
         and len(journal_mod.Journal(src).events(1000)) > 0
     )
+
+
+def test_split_append_merges_runs_of_the_same_portfolio_into_one_journal(tmp_path):
+    a_old, a_new = tmp_path / "beta.db", tmp_path / "beta_oggi.db"
+    j1 = journal_mod.Journal(a_old, "Portafoglio beta", "beta")
+    _run(j1, "r-ieri", A, "beta", 3)
+    j2 = journal_mod.Journal(a_new, "Portafoglio beta", "beta")
+    _run(j2, "r-oggi", A, "beta", 2)
+    before = a_new.read_bytes()
+    res = journal_tool.split(a_new, a_old, ["r-oggi"], None, None, append=True)
+    assert res["proposals"] == 2 and res["skipped"] == [] and res["account"] == A
+    assert a_new.read_bytes() == before  # la sorgente non cambia
+    merged = journal_mod.Journal(a_old)
+    runs = merged.runs()
+    assert [r["run_id"] for r in runs] == ["r-ieri", "r-oggi"]  # in ordine di tempo
+    assert {p["run_id"] for p in merged.proposals()} == {"r-ieri", "r-oggi"} and len(
+        merged.proposals()
+    ) == 5
+    assert all(e["portfolio"] == "Portafoglio beta" for e in merged.events(1000))
+    # rilanciare non duplica
+    res2 = journal_tool.split(a_new, a_old, ["r-oggi"], None, None, append=True)
+    assert res2["skipped"] == ["r-oggi"] and res2["events"] == 0 and len(merged.proposals()) == 5
+
+
+def test_split_append_refuses_a_different_account_and_plain_split_still_refuses_existing_files(
+    tmp_path,
+):
+    dst, src = tmp_path / "d.db", tmp_path / "s.db"
+    _run(journal_mod.Journal(dst), "r1", A, "beta")
+    _run(journal_mod.Journal(src), "r2", B, "quality")
+    with pytest.raises(journal_mod.JournalAccountError, match="non le unisco"):
+        journal_tool.split(src, dst, ["r2"], None, None, append=True)
+    assert {r["run_id"] for r in journal_mod.Journal(dst).runs()} == {"r1"}
+    with pytest.raises(FileExistsError):
+        journal_tool.split(src, dst, ["r2"], None, None)
+    with pytest.raises(FileExistsError):
+        journal_tool.split(dst, dst, ["r1"], None, None, append=True)
+
+
+def test_split_append_cli(tmp_path, capsys):
+    dst, src = tmp_path / "d.db", tmp_path / "s.db"
+    _run(journal_mod.Journal(dst, "P", "beta"), "r1", A, "beta")
+    _run(journal_mod.Journal(src, "P", "beta"), "r2", A, "beta")
+    cmd = ["split", "--db", str(src), "--to", str(dst), "--run-id", "r2", "--append"]
+    assert journal_tool.main(cmd) == 0 and "Copiate 1 esecuzioni" in capsys.readouterr().out
+    assert journal_tool.main(cmd) == 0 and "Già presenti e saltate: r2" in capsys.readouterr().out
+    assert journal_tool.main([*cmd, "--overwrite"]) == 2
+
+
+def test_compare_summarizes_several_journals_of_one_portfolio(tmp_path):
+    import compare_portfolios as cp
+
+    j1 = journal_mod.Journal(tmp_path / "a.db", "B", "beta")
+    _run(j1, "r1", A, "beta")
+    j1.set_status("r1-p0", "filled", "DECISION_DONE")
+    j2 = journal_mod.Journal(tmp_path / "b.db", "B", "beta")
+    _run(j2, "r2", A, "beta")
+    j2.set_status("r2-p0", "filled", "DECISION_DONE")
+    j2.log("TRADE_FAILED", {"symbol": "X", "reason": "x"}, "r2")
+    one = cp.journal_summary(tmp_path / "a.db")
+    both = cp.journal_summary([tmp_path / "a.db", tmp_path / "b.db"])
+    assert one["n_runs"] == 1 and both["n_runs"] == 2 and both["n_journals"] == 2
+    assert both["trade_failed"] == 1 and both["strategy"] == "beta"
+    assert both["first_fill"] == min(
+        one["first_fill"], cp.journal_summary(tmp_path / "b.db")["first_fill"]
+    )
+    assert cp.journal_summary([]) == {} and cp.journal_summary([tmp_path / "manca.db"]) == {}

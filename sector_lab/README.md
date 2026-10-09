@@ -149,6 +149,10 @@ in un journal nuovo, con portafoglio e strategia:
 uv run python sector_lab/journal_tool.py split --db sector_lab/journal.db --to sector_lab/journal_p18.db --run-id 20261008-180425-8dc4 --portfolio "Portafoglio 18" --strategy quality
 ```
 
+Per **riunire** in un solo journal le esecuzioni di uno stesso portafoglio finite in file diversi usa `--append`
+(le esecuzioni già presenti si saltano e un conto diverso viene rifiutato). `compare_portfolios.py` accetta più
+volte `--journal-a` / `--journal-b` se un portafoglio è su più file.
+
 `--run-id` si ripete per più esecuzioni; se il file di destinazione esiste già (un tentativo precedente) il comando
 si ferma: aggiungi `--overwrite` per sostituirlo. Con `list` vedi le esecuzioni con data e ora (UTC).
 

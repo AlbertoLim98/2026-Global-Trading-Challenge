@@ -29,7 +29,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from journal import STRATEGY_LABEL, Journal
+from journal import STRATEGY_LABEL, Journal, JournalAccountError, peek_account
 
 
 def _local(ts: str, tz: ZoneInfo) -> datetime:
@@ -68,8 +68,13 @@ def split(
     run_ids: list[str],
     portfolio: str | None,
     strategy: str | None,
+    append: bool = False,
 ) -> dict:
     """Copia le esecuzioni indicate (eventi, operazioni, indicatori) in un journal NUOVO; l'originale non cambia.
+
+    Con `append=True` le aggiunge invece a un journal già esistente (le esecuzioni già presenti si saltano e un conto
+    diverso da quello del journal di destinazione viene rifiutato): serve a riunire in un solo journal le esecuzioni
+    di uno stesso portafoglio finite in file diversi.
 
     Serve a separare un journal in cui si sono mescolati due portafogli (per esempio cambiando le chiavi nel .env
     ma usando sempre lo stesso file). Se indicati, `portfolio` e `strategy` vengono scritti in tutte le righe copiate.
@@ -77,14 +82,40 @@ def split(
     import json
     import sqlite3
 
-    if Path(dst).exists():
-        raise FileExistsError(f"{dst} esiste già: scegli un nome nuovo")
+    exists = Path(dst).exists()
+    if exists and not append:
+        raise FileExistsError(
+            f"{dst} esiste già: scegli un nome nuovo (o usa --append / --overwrite)"
+        )
+    if exists and Path(dst).resolve() == Path(src).resolve():
+        raise FileExistsError("il journal di destinazione non può essere quello di origine")
     srcdb = sqlite3.connect(f"file:{Path(src).as_posix()}?mode=ro", uri=True)
     srcdb.row_factory = sqlite3.Row
     out = Journal(dst, portfolio, strategy)
+    present = {
+        r[0] for r in out._db.execute("SELECT DISTINCT run_id FROM events WHERE run_id IS NOT NULL")
+    }
+    skipped = [r for r in run_ids if r in present]
+    run_ids = [r for r in run_ids if r not in present]
     marks = ",".join("?" * len(run_ids))
     counts = {"events": 0, "proposals": 0, "indicators": 0}
     accounts: set[str] = set()
+    for (payload,) in srcdb.execute(
+        f"SELECT payload FROM events WHERE kind = 'RUN' AND run_id IN ({marks})", run_ids
+    ):
+        acct = (json.loads(payload).get("account") or {}).get("account_number")
+        if acct:
+            accounts.add(acct)
+    known = peek_account(dst) if exists else None
+    if known and accounts - {known}:
+        srcdb.close()
+        raise JournalAccountError(
+            f"Le esecuzioni sono del conto {', '.join(sorted(accounts))} ma {dst} appartiene al conto {known}: "
+            "non le unisco per non mescolare due portafogli."
+        )
+    if not run_ids:
+        srcdb.close()
+        return counts | {"account": known, "accounts_seen": sorted(accounts), "skipped": skipped}
 
     def rewrite(d: dict) -> dict:
         if portfolio:
@@ -151,7 +182,8 @@ def split(
     finally:
         srcdb.close()
     return counts | {
-        "account": next(iter(accounts)) if len(accounts) == 1 else None,
+        "skipped": skipped,
+        "account": next(iter(accounts)) if len(accounts) == 1 else known,
         "accounts_seen": sorted(accounts),
     }
 
@@ -181,6 +213,11 @@ def main(argv: list[str] | None = None) -> int:
         "--to", help="split: percorso del journal NUOVO in cui copiare le esecuzioni scelte"
     )
     ap.add_argument(
+        "--append",
+        action="store_true",
+        help="split: aggiunge le esecuzioni a un journal già esistente (stesso portafoglio e conto)",
+    )
+    ap.add_argument(
         "--overwrite",
         action="store_true",
         help="split: sostituisce il journal di destinazione se esiste già",
@@ -208,19 +245,28 @@ def main(argv: list[str] | None = None) -> int:
         if a.dry_run:
             print(f"\n{len(chosen)} esecuzioni verrebbero copiate in {a.to}")
             return 0
+        if a.append and a.overwrite:
+            print("--append e --overwrite non si usano insieme", file=sys.stderr)
+            return 2
         if a.overwrite and Path(a.to).exists():
             if Path(a.to).resolve() == Path(a.db).resolve():
                 print("--to non può essere il journal di origine", file=sys.stderr)
                 return 2
             Path(a.to).unlink()
         try:
-            res = split(a.db, a.to, [r["run_id"] for r in chosen], a.portfolio, a.strategy)
-        except FileExistsError as e:
+            res = split(
+                a.db, a.to, [r["run_id"] for r in chosen], a.portfolio, a.strategy, a.append
+            )
+        except (FileExistsError, JournalAccountError) as e:
             print(e, file=sys.stderr)
             return 2
+        done = len(chosen) - len(res["skipped"])
         print(
-            f"\nCopiate {len(chosen)} esecuzioni in {a.to}: {res['events']} eventi, {res['proposals']} operazioni, {res['indicators']} righe di indicatori."
+            f"\nCopiate {done} esecuzioni in {a.to}: {res['events']} eventi, {res['proposals']} operazioni, "
+            f"{res['indicators']} righe di indicatori."
         )
+        if res["skipped"]:
+            print("Già presenti e saltate:", ", ".join(res["skipped"]))
         print(
             f"Conto: {res['account'] or 'non determinabile (' + ', '.join(res['accounts_seen']) + ')' if res['accounts_seen'] else 'non registrato nelle esecuzioni copiate'}"
         )

@@ -92,9 +92,39 @@ def snapshot(
     }
 
 
-def journal_summary(path: str | Path | None) -> dict:
-    """Riepilogo del journal in sola lettura: ribilanciamenti, strategia, esito delle operazioni."""
-    if not path or not Path(path).exists():
+def journal_summary(paths: str | Path | list | tuple | None) -> dict:
+    """Riepilogo in sola lettura di uno o più journal dello stesso portafoglio (ribilanciamenti, strategia, esiti).
+
+    Con più file i conteggi si sommano, il primo ordine eseguito è il più antico e la strategia è quella
+    dell'ultimo ribilanciamento.
+    """
+    if not paths:
+        return {}
+    if isinstance(paths, (str, Path)):
+        return _journal_one(paths)
+    parts = [x for x in (_journal_one(p) for p in paths) if x]
+    if not parts:
+        return {}
+    last = max(
+        (x for x in parts if x.get("last_run")), key=lambda x: x["last_run"], default=parts[0]
+    )
+    fills = [x["first_fill"] for x in parts if x.get("first_fill")]
+    ops: dict[str, int] = {}
+    for x in parts:
+        for k, v in x.get("operations", {}).items():
+            ops[k] = ops.get(k, 0) + v
+    return {
+        **last,
+        "n_runs": sum(x.get("n_runs", 0) for x in parts),
+        "operations": ops,
+        "trade_failed": sum(x.get("trade_failed", 0) for x in parts),
+        "first_fill": min(fills) if fills else None,
+        "n_journals": len(parts),
+    }
+
+
+def _journal_one(path: str | Path) -> dict:
+    if not Path(path).exists():
         return {}
     db = sqlite3.connect(f"file:{Path(path).as_posix()}?mode=ro", uri=True)
     db.row_factory = sqlite3.Row
@@ -545,8 +575,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--env-b", help="file di chiavi del portafoglio B")
     ap.add_argument("--name-a", default="Portafoglio A")
     ap.add_argument("--name-b", default="Portafoglio B")
-    ap.add_argument("--journal-a", help="journal del portafoglio A (facoltativo)")
-    ap.add_argument("--journal-b", help="journal del portafoglio B (facoltativo)")
+    ap.add_argument(
+        "--journal-a",
+        action="append",
+        help="journal del portafoglio A (facoltativo; ripetibile se è su più file)",
+    )
+    ap.add_argument(
+        "--journal-b",
+        action="append",
+        help="journal del portafoglio B (facoltativo; ripetibile se è su più file)",
+    )
     ap.add_argument(
         "--period", default="1M", help="storico del patrimonio: 1W, 1M, 3M, 1A, all (default 1M)"
     )

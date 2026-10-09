@@ -418,7 +418,7 @@ class Journal:
     def latest_run_id(self) -> str | None:
         with self._lock:
             r = self._db.execute(
-                "SELECT run_id FROM events WHERE kind = 'RUN' ORDER BY id DESC LIMIT 1"
+                "SELECT run_id FROM events WHERE kind = 'RUN' ORDER BY ts DESC, id DESC LIMIT 1"
             ).fetchone()
         return r["run_id"] if r else None
 
@@ -426,7 +426,7 @@ class Journal:
         """Riallocazioni (esecuzioni complete) dalla più vecchia: data, patrimonio al via, modalità."""
         with self._lock:
             rows = self._db.execute(
-                "SELECT ts, run_id, payload, portfolio, strategy FROM events WHERE kind = 'RUN' ORDER BY id ASC"
+                "SELECT ts, run_id, payload, portfolio, strategy FROM events WHERE kind = 'RUN' ORDER BY ts, id"
             ).fetchall()
         out = []
         labels = self.labels()
@@ -456,7 +456,7 @@ class Journal:
         """Apertura del portafoglio: data e patrimonio del conto al primo ribilanciamento registrato."""
         with self._lock:
             r = self._db.execute(
-                "SELECT ts, payload FROM events WHERE kind = 'RUN' ORDER BY id ASC LIMIT 1"
+                "SELECT ts, payload FROM events WHERE kind = 'RUN' ORDER BY ts, id LIMIT 1"
             ).fetchone()
         if not r:
             return None
