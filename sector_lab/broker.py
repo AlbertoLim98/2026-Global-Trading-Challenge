@@ -10,6 +10,8 @@ import threading
 import uuid
 from typing import Any, Protocol
 
+from net import with_retry
+
 PAPER_HOST = "paper-api.alpaca.markets"
 
 
@@ -57,7 +59,7 @@ class AlpacaBroker:
         self._feed = feed
 
     def account(self) -> dict:
-        a = self._t.get_account()
+        a = with_retry(self._t.get_account)
         return {
             "equity": float(a.equity),
             "cash": float(a.cash),
@@ -78,11 +80,11 @@ class AlpacaBroker:
                 "pl_pct": float(p.unrealized_plpc),
                 "day_pl": float(getattr(p, "unrealized_intraday_pl", None) or 0.0),
             }
-            for p in self._t.get_all_positions()
+            for p in with_retry(self._t.get_all_positions)
         ]
 
     def clock(self) -> dict:
-        c = self._t.get_clock()
+        c = with_retry(self._t.get_clock)
         return {
             "is_open": bool(c.is_open),
             "next_open": str(c.next_open),
@@ -94,8 +96,10 @@ class AlpacaBroker:
         from alpaca.trading.enums import AssetClass, AssetStatus
         from alpaca.trading.requests import GetAssetsRequest
 
-        assets = self._t.get_all_assets(
-            GetAssetsRequest(status=AssetStatus.ACTIVE, asset_class=AssetClass.US_EQUITY)
+        assets = with_retry(
+            lambda: self._t.get_all_assets(
+                GetAssetsRequest(status=AssetStatus.ACTIVE, asset_class=AssetClass.US_EQUITY)
+            )
         )
         return {a.symbol for a in assets if a.tradable}
 
@@ -108,7 +112,8 @@ class AlpacaBroker:
             req = StockLatestTradeRequest(
                 symbol_or_symbols=symbols[i : i + 100], feed=DataFeed(self._feed)
             )
-            out |= {s: float(t.price) for s, t in self._d.get_stock_latest_trade(req).items()}
+            trades = with_retry(lambda req=req: self._d.get_stock_latest_trade(req))
+            out |= {s: float(t.price) for s, t in trades.items()}
         return out
 
     def submit_market(self, symbol: str, side: str, qty: float, client_id: str) -> dict:
@@ -148,16 +153,16 @@ class AlpacaBroker:
         from alpaca.common.exceptions import APIError
 
         try:
-            return _order(self._t.submit_order(req))
+            return _order(with_retry(lambda: self._t.submit_order(req)))
         except APIError as err:
             # stesso client_order_id già usato (es. doppio clic): restituisci l'ordine esistente
             try:
-                return _order(self._t.get_order_by_client_id(client_id))
+                return _order(with_retry(lambda: self._t.get_order_by_client_id(client_id)))
             except APIError:
                 raise err from None
 
     def get_order(self, order_id: str) -> dict:
-        return _order(self._t.get_order_by_id(order_id))
+        return _order(with_retry(lambda: self._t.get_order_by_id(order_id)))
 
 
 class DemoBroker:

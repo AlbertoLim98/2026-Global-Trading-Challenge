@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from net import with_retry
 
 SECTORS: dict[str, str] = {
     "XLK": "Tecnologia",
@@ -30,6 +31,7 @@ SECTORS: dict[str, str] = {
 BENCHMARK = "SPY"
 STOCK_BENCHMARK = "ACWI"  # riferimento per il rendimento relativo delle aziende
 UNIVERSE_CSV = Path(__file__).with_name("universe_us.csv")
+CHUNK = 50  # simboli per richiesta di barre
 LOOKBACK_DAYS = 600  # ~410 sedute: 12 mesi di rendimenti + SMA200 sull'intero grafico
 
 
@@ -62,8 +64,10 @@ def fetch_bars(symbols: list[str], feed: str = "iex") -> dict[str, pd.DataFrame]
         raise RuntimeError("ALPACA_API_KEY / ALPACA_SECRET_KEY mancanti (.env)")
     client = StockHistoricalDataClient(*creds)
     out: dict[str, pd.DataFrame] = {}
-    for i in range(0, len(symbols), 100):  # richieste da max 100 simboli
-        chunk = symbols[i : i + 100]
+    for i in range(
+        0, len(symbols), CHUNK
+    ):  # richieste da pochi simboli: meno chiusure di connessione
+        chunk = symbols[i : i + CHUNK]
         req = StockBarsRequest(
             symbol_or_symbols=chunk,
             timeframe=TimeFrame.Day,
@@ -71,7 +75,7 @@ def fetch_bars(symbols: list[str], feed: str = "iex") -> dict[str, pd.DataFrame]
             adjustment=Adjustment.ALL,
             feed=DataFeed(feed.lower()),
         )
-        raw = client.get_stock_bars(req).df
+        raw = with_retry(lambda req=req: client.get_stock_bars(req).df)
         if raw.empty:
             continue
         present = set(raw.index.get_level_values(0))

@@ -29,6 +29,7 @@ import desk as desk_mod
 import export
 import journal as journal_mod
 import metrics
+import net
 import portfolio
 import shortterm
 import stocks
@@ -67,10 +68,10 @@ class State:
             self._tradable = (time.time(), syms)
         return syms
 
-    def short_view(self, refresh: bool = False) -> dict:
+    def short_view(self, refresh: bool = False, max_age: float = CACHE_TTL) -> dict:
         """Score di breve periodo (1 giorno) di tutto l'universo negoziabile, con il contesto di mercato."""
         with self._lock:
-            if self._short and not refresh and time.time() - self._short[0] < CACHE_TTL:
+            if self._short and not refresh and time.time() - self._short[0] < max_age:
                 return self._short[1]
         uni = data.load_universe()
         tradable = self.tradable()
@@ -112,7 +113,9 @@ class State:
         with self._lock:
             if self._short_ic and not refresh and time.time() - self._short_ic[0] < 3600:
                 return self._short_ic[1]
-        rep = shortterm.ic_report(self.short_view()["_panel"])
+        rep = shortterm.ic_report(
+            self.short_view(max_age=3600)["_panel"]
+        )  # niente nuovo scaricamento
         with self._lock:
             self._short_ic = (time.time(), rep)
         return rep
@@ -212,6 +215,16 @@ class State:
         }
 
 
+def _explain(e: Exception) -> str:
+    """Messaggio per l'interfaccia: gli errori di rete transitori vengono spiegati, il resto resta com'è."""
+    if net.is_transient(e):
+        return (
+            "Alpaca ha interrotto la connessione o è momentaneamente non raggiungibile "
+            f"(dopo vari tentativi automatici). Riprova tra qualche secondo. [{type(e).__name__}]"
+        )
+    return f"{type(e).__name__}: {e}"
+
+
 def make_handler(state: State, desk: desk_mod.Desk, port: int) -> type[BaseHTTPRequestHandler]:
     allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
 
@@ -262,7 +275,7 @@ def make_handler(state: State, desk: desk_mod.Desk, port: int) -> type[BaseHTTPR
                 self._json({"error": str(e)}, 400)
             except Exception as e:  # noqa: BLE001
                 desk.journal.log("ERROR", {"message": f"{type(e).__name__}: {e}", "path": url.path})
-                self._json({"error": f"{type(e).__name__}: {e}"}, 500)
+                self._json({"error": _explain(e)}, 502 if net.is_transient(e) else 500)
 
         def do_GET(self) -> None:
             if not self._host_ok():
@@ -369,7 +382,7 @@ def make_handler(state: State, desk: desk_mod.Desk, port: int) -> type[BaseHTTPR
                 else:
                     self._json({"error": "non trovato"}, 404)
             except Exception as e:  # noqa: BLE001 - mostra l'errore nell'interfaccia invece di chiudere
-                self._json({"error": f"{type(e).__name__}: {e}"}, 500)
+                self._json({"error": _explain(e)}, 502 if net.is_transient(e) else 500)
 
         def log_message(self, *a: object) -> None:
             pass
