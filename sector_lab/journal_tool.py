@@ -37,12 +37,13 @@ def _local(ts: str, tz: ZoneInfo) -> datetime:
 
 
 def _fmt(runs: list[dict], tz: ZoneInfo) -> str:
-    lines = [f"{'run_id':<26}{'ora locale':<20}{'tipo':<18}{'registrata':<11}{'assegnata a'}"]
+    head = f"ora ({tz.key})"
+    lines = [f"{'run_id':<26}{head:<20}{'tipo':<18}{'registrata':<11}{'assegnata a'}"]
     for r in runs:
         kind = "ribilanciamento" if "RUN" in (r["kinds"] or "") else "controllo stop"
         lab = f"{r['portfolio'] or '-'} / {STRATEGY_LABEL.get(r['strategy'], r['strategy'] or '-')}"
         lines.append(
-            f"{r['run_id']:<26}{_local(r['ts'], tz):%Y-%m-%d %H:%M':<20}{kind:<18}"
+            f"{r['run_id']:<26}{_local(r['ts'], tz).strftime('%Y-%m-%d %H:%M'):<20}{kind:<18}"
             f"{r['recorded_mode'] or '-':<11}{lab}{' (riclassificata)' if r['relabeled'] else ''}"
         )
     return "\n".join(lines)
@@ -202,6 +203,11 @@ def main(argv: list[str] | None = None) -> int:
         if a.dry_run:
             print(f"\n{len(chosen)} esecuzioni verrebbero copiate in {a.to}")
             return 0
+        if a.overwrite and Path(a.to).exists():
+            if Path(a.to).resolve() == Path(a.db).resolve():
+                print("--to non può essere il journal di origine", file=sys.stderr)
+                return 2
+            Path(a.to).unlink()
         try:
             res = split(a.db, a.to, [r["run_id"] for r in chosen], a.portfolio, a.strategy)
         except FileExistsError as e:

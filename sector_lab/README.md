@@ -149,6 +149,9 @@ in un journal nuovo, con portafoglio e strategia:
 uv run python sector_lab/journal_tool.py split --db sector_lab/journal.db --to sector_lab/journal_p18.db --run-id 20261008-180425-8dc4 --portfolio "Portafoglio 18" --strategy quality
 ```
 
+`--run-id` si ripete per più esecuzioni; se il file di destinazione esiste già (un tentativo precedente) il comando
+si ferma: aggiungi `--overwrite` per sostituirlo. Con `list` vedi le esecuzioni con data e ora (UTC).
+
 **Correggere i dati precedenti.** Il journal è in sola aggiunta, quindi le righe vecchie non si
 modificano: si registra un evento di riclassificazione che interfaccia ed Excel applicano a tutte le
 righe di quelle esecuzioni (vince l'ultima assegnazione). Corregge l'etichetta, non ciò che è stato

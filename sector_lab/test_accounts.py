@@ -138,3 +138,33 @@ def test_split_cli_dry_run_and_validation(tmp_path, capsys):
             ]
             == "P"
         )
+
+
+def test_list_output_is_well_formatted(tmp_path, capsys):
+    j = journal_mod.Journal(tmp_path / "l.db", "P", "beta")
+    _run(j, "20261008-173732-0c87", A, "beta")
+    assert journal_tool.main(["list", "--db", str(tmp_path / "l.db")]) == 0
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    assert "ora (UTC)" in lines[0] and "':" not in out and "<20" not in out
+    assert lines[1].startswith("20261008-173732-0c87") and "ribilanciamento" in lines[1]
+    assert lines[1].split()[1] == journal_mod.iso(journal_mod.now())[:10]  # data di oggi (UTC)
+
+
+def test_split_overwrite_replaces_a_previous_attempt_but_never_the_source(tmp_path):
+    src = tmp_path / "m.db"
+    j = journal_mod.Journal(src)
+    _run(j, "r1", A, "beta")
+    _run(j, "r2", A, "short")
+    dst = tmp_path / "d.db"
+    base = ["split", "--db", str(src), "--to", str(dst), "--portfolio", "P", "--strategy", "beta"]
+    assert journal_tool.main([*base, "--run-id", "r1"]) == 0
+    assert journal_tool.main([*base, "--run-id", "r2"]) == 2  # esiste già: non sovrascrive da solo
+    assert journal_tool.main([*base, "--run-id", "r2", "--overwrite"]) == 0
+    assert {e["run_id"] for e in journal_mod.Journal(dst).events(1000)} == {"r2"}
+    same = ["split", "--db", str(src), "--to", str(src), "--run-id", "r1", "--overwrite"]
+    assert (
+        journal_tool.main(same) == 2
+        and src.exists()
+        and len(journal_mod.Journal(src).events(1000)) > 0
+    )
