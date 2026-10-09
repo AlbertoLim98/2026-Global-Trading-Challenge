@@ -41,6 +41,10 @@ CREATE TABLE IF NOT EXISTS indicators (
     target_value REAL,
     data TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS journal_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE TRIGGER IF NOT EXISTS indicators_no_update BEFORE UPDATE ON indicators
 BEGIN SELECT RAISE(ABORT, 'journal append-only'); END;
 CREATE TRIGGER IF NOT EXISTS indicators_no_delete BEFORE DELETE ON indicators
@@ -56,6 +60,33 @@ RELABEL = "RELABEL"  # evento di riclassificazione: il registro resta in sola ag
 
 # stati "attivi": ordine in corso oppure fallito e ancora da gestire
 ACTIVE_STATUSES = ("submitted", "failed")
+
+
+class JournalAccountError(Exception):
+    """Il journal appartiene a un altro conto Alpaca: usarlo mescolerebbe i dati di due portafogli."""
+
+
+def peek_account(path: str | Path) -> str | None:
+    """Conto Alpaca a cui appartiene un journal (lettura senza modificare il file), se noto."""
+    p = Path(path)
+    if not p.exists():
+        return None
+    db = sqlite3.connect(f"file:{p.as_posix()}?mode=ro", uri=True)
+    try:
+        r = db.execute("SELECT value FROM journal_meta WHERE key = 'account_number'").fetchone()
+        if r:
+            return r[0]
+        for (payload,) in db.execute(
+            "SELECT payload FROM events WHERE kind = 'RUN' ORDER BY id DESC"
+        ):
+            acct = (json.loads(payload).get("account") or {}).get("account_number")
+            if acct:
+                return acct
+    except sqlite3.DatabaseError:
+        return None
+    finally:
+        db.close()
+    return None
 
 
 def now() -> datetime:
@@ -83,6 +114,35 @@ class Journal:
             for c in ("portfolio", "strategy"):
                 if c not in cols:
                     self._db.execute(f"ALTER TABLE events ADD COLUMN {c} TEXT")
+
+    def bind_account(self, account_number: str | None) -> None:
+        """Lega il journal a un conto Alpaca; rifiuta un conto diverso (evita di mescolare due portafogli)."""
+        if not account_number:
+            return
+        with self._lock:
+            r = self._db.execute(
+                "SELECT value FROM journal_meta WHERE key = 'account_number'"
+            ).fetchone()
+            known = r[0] if r else None
+            if known is None:  # journal vecchi: il conto dell'ultimo ribilanciamento registrato
+                for (payload,) in self._db.execute(
+                    "SELECT payload FROM events WHERE kind = 'RUN' ORDER BY id DESC"
+                ):
+                    known = (json.loads(payload).get("account") or {}).get("account_number")
+                    if known:
+                        break
+            if known and known != account_number:
+                raise JournalAccountError(
+                    f"Questo journal appartiene al conto {known}, ma le chiavi in uso sono del conto "
+                    f"{account_number}. Per non mescolare due portafogli usa un journal diverso "
+                    "(--journal PERCORSO) oppure le chiavi giuste."
+                )
+            if r is None:
+                with self._db:
+                    self._db.execute(
+                        "INSERT OR IGNORE INTO journal_meta (key, value) VALUES ('account_number', ?)",
+                        (account_number,),
+                    )
 
     # --- registro -------------------------------------------------------------------------------
     def log(

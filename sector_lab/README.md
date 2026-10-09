@@ -135,6 +135,20 @@ uv run python sector_lab/server.py --portfolio "Portafoglio 18" --strategy quali
 Il journal di ciascuno è `sector_lab/journal_<nome>.db` (cambialo con `--journal`). Per tenere un
 journal già esistente, passa il suo percorso con `--journal`.
 
+**Un journal = un conto Alpaca.** Non cambiare le chiavi nel `.env` (togliendo e rimettendo `#`) usando lo
+stesso journal: i dati di due portafogli si mescolano. Il programma ora lega ogni journal al numero del conto
+Alpaca: se avvii con chiavi di un altro conto, senza `--journal` usa `journal_<numero del conto>.db`; con un
+`--journal` o un `--portfolio` che appartiene a un altro conto si ferma con un messaggio. Il modo giusto è un file
+di chiavi e un'istanza per portafoglio (`--env .env.p17`, `--env .env.p18`, porte diverse). I file `.env.*`
+non vanno mai nel repository (sono nel `.gitignore`).
+
+**Separare un journal già mescolato** (l'originale non cambia): `journal_tool.py split` copia le esecuzioni scelte
+in un journal nuovo, con portafoglio e strategia:
+
+```bash
+uv run python sector_lab/journal_tool.py split --db sector_lab/journal.db --to sector_lab/journal_p18.db --run-id 20261008-180425-8dc4 --portfolio "Portafoglio 18" --strategy quality
+```
+
 **Correggere i dati precedenti.** Il journal è in sola aggiunta, quindi le righe vecchie non si
 modificano: si registra un evento di riclassificazione che interfaccia ed Excel applicano a tutte le
 righe di quelle esecuzioni (vince l'ultima assegnazione). Corregge l'etichetta, non ciò che è stato

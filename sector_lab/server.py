@@ -225,6 +225,35 @@ def _explain(e: Exception) -> str:
     return f"{type(e).__name__}: {e}"
 
 
+def choose_journal_path(
+    here: Path,
+    portfolio: str | None,
+    explicit: str | None,
+    env_path: str | None,
+    account: str | None,
+) -> tuple[Path, str | None]:
+    """Journal da usare e, se serve, una nota per l'utente.
+
+    Un journal appartiene a un conto Alpaca. Con `--journal` o SECTOR_LAB_JOURNAL si usa quel file. Con un nome di
+    portafoglio si usa `journal_<nome>.db`. Senza nome si usa `journal.db`, ma solo se è dello stesso conto (o senza
+    conto noto): altrimenti `journal_<numero del conto>.db`, così cambiare chiavi non mescola due portafogli.
+    """
+    if explicit or env_path:
+        return Path(explicit or env_path), None
+    slug = "".join(c if c.isalnum() else "_" for c in (portfolio or "").lower()).strip("_")
+    if slug:
+        return here / f"journal_{slug}.db", None
+    generic = here / "journal.db"
+    known = journal_mod.peek_account(generic)
+    if known and account and known != account:
+        alt = here / f"journal_{account}.db"
+        return (
+            alt,
+            f"{generic.name} appartiene al conto {known}: per il conto {account} uso {alt.name}",
+        )
+    return generic, None
+
+
 def make_handler(state: State, desk: desk_mod.Desk, port: int) -> type[BaseHTTPRequestHandler]:
     allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
 
@@ -426,17 +455,24 @@ def main() -> None:
     else:
         creds = data.keys()
         broker = broker_mod.AlpacaBroker(*creds, feed=feed)
-        slug = "".join(c if c.isalnum() else "_" for c in (a.portfolio or "").lower()).strip("_")
-        default = HERE / (f"journal_{slug}.db" if slug else "journal.db")
-        jpath = Path(a.journal or os.environ.get("SECTOR_LAB_JOURNAL") or default)
+        account = None
+        with contextlib.suppress(
+            Exception
+        ):  # senza rete non si può riconoscere il conto: nessun controllo
+            account = broker.account().get("account_number")
+        jpath, note = choose_journal_path(
+            HERE, a.portfolio, a.journal, os.environ.get("SECTOR_LAB_JOURNAL"), account
+        )
+        if note:
+            print("Nota:", note)
     state.tradable_fn = broker.tradable_symbols
-    desk = desk_mod.Desk(
-        state,
-        broker,
-        journal_mod.Journal(jpath, a.portfolio, a.strategy),
-        portfolio=a.portfolio,
-        strategy=a.strategy,
-    )
+    journal = journal_mod.Journal(jpath, a.portfolio, a.strategy)
+    if not a.demo:
+        try:
+            journal.bind_account(account)
+        except journal_mod.JournalAccountError as e:
+            sys.exit(f"{e}\nJournal: {jpath}")
+    desk = desk_mod.Desk(state, broker, journal, portfolio=a.portfolio, strategy=a.strategy)
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(state, desk, a.port))
     url = f"http://127.0.0.1:{a.port}"
     label = f" · {a.portfolio}" if a.portfolio else ""

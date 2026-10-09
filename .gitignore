@@ -7,3 +7,7 @@ __pycache__/
 journal.db
 journal_demo.db
 *.db
+
+# file di chiavi per più portafogli (.env.p17, .env.p18...): mai nel repository
+.env.*
+!.env.example
