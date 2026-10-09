@@ -4,11 +4,15 @@ Il journal è in sola aggiunta: nessuna riga viene modificata. L'assegnazione è
 RELABEL che l'interfaccia e l'Excel applicano a tutte le righe di quelle esecuzioni (l'ultima
 assegnazione vince). Non cambia ciò che è stato davvero eseguito sul conto: corregge solo l'etichetta.
 
+Le ore si leggono in UTC (come la colonna "Data/ora (UTC)" dell'Excel); con --tz si cambia fuso.
+L'ora serve solo a scegliere righe già scritte: il programma non pianifica né forza mai i ribilanciamenti,
+che partono solo quando premi il pulsante.
+
     uv run python sector_lab/journal_tool.py list    --db sector_lab/journal.db
     uv run python sector_lab/journal_tool.py relabel --db sector_lab/journal.db \\
         --hour 17 --portfolio "Portafoglio 17" --strategy beta --dry-run
     uv run python sector_lab/journal_tool.py relabel --db sector_lab/journal.db \\
-        --hour 18 --portfolio "Portafoglio 18" --strategy quality
+        --run-id 20261008-180425-8dc4 --portfolio "Portafoglio 18" --strategy quality
 """
 
 from __future__ import annotations
@@ -57,10 +61,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("command", choices=["list", "relabel"])
     ap.add_argument("--db", required=True, help="percorso del journal (.db)")
     ap.add_argument(
-        "--tz", default="Europe/Rome", help="fuso per leggere le ore (default Europe/Rome)"
+        "--tz",
+        default="UTC",
+        help="fuso con cui leggere le ore (default UTC, come l'Excel del journal)",
     )
     ap.add_argument(
-        "--hour", type=int, help="assegna le esecuzioni avviate in quest'ora locale (0-23)"
+        "--hour",
+        type=int,
+        help="seleziona le esecuzioni GIÀ REGISTRATE avviate a quest'ora (0-23), solo per etichettarle",
     )
     ap.add_argument("--date", help="limita a un giorno (AAAA-MM-GG, nel fuso scelto)")
     ap.add_argument("--run-id", action="append", default=[], help="esecuzione precisa (ripetibile)")

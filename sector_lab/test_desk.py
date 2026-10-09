@@ -617,15 +617,15 @@ def test_old_journal_gets_new_columns_and_relabel_corrects_without_rewriting(tmp
         """CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, kind TEXT NOT NULL,
         run_id TEXT, proposal_id TEXT, payload TEXT NOT NULL);
         INSERT INTO events (ts, kind, run_id, payload) VALUES
-        ('2026-10-08T15:05:00Z','RUN','r17','{"params":{"mode":"quality"},"account":{"equity":1000000}}'),
-        ('2026-10-08T15:06:00Z','PROPOSAL','r17','{"kind":"BUY","qty":1,"symbol":"A","price":1,"value":1,"reason":"x"}'),
-        ('2026-10-08T16:05:00Z','RUN','r18','{"params":{"mode":"quality"},"account":{"equity":1000000}}');"""
+        ('2026-10-08T17:05:00Z','RUN','r17','{"params":{"mode":"quality"},"account":{"equity":1000000}}'),
+        ('2026-10-08T17:06:00Z','PROPOSAL','r17','{"kind":"BUY","qty":1,"symbol":"A","price":1,"value":1,"reason":"x"}'),
+        ('2026-10-08T18:05:00Z','RUN','r18','{"params":{"mode":"quality"},"account":{"equity":1000000}}');"""
     )
     old.commit()
     old.close()
     j = journal_mod.Journal(path)
     assert all(e["portfolio"] is None for e in j.events())  # non assegnato
-    # 15:05 UTC = 17:05 a Roma (CEST); 16:05 UTC = 18:05
+    # le ore si leggono in UTC, come nell'Excel del journal
     assert (
         journal_tool.main(
             [
@@ -735,3 +735,62 @@ def test_journal_excel_has_portfolio_and_strategy_columns(tmp_path):
     assert "Portafoglio" in heads and "Strategia" in heads
     i = heads.index("Strategia") + 1
     assert {ws.cell(r, i).value for r in range(3, ws.max_row + 1)} == {"Qualità"}
+
+
+def test_hour_is_read_in_utc_by_default_and_tz_can_be_changed(tmp_path, capsys):
+    path = tmp_path / "h.db"
+    journal_mod.Journal(path).log(
+        "RUN", {"params": {"mode": "beta"}, "account": {"equity": 1}}, "r1"
+    )
+    j = journal_mod.Journal(path)
+    h = int(j.run_catalog()[0]["ts"][11:13])  # ora UTC dell'esecuzione
+    assert (
+        journal_tool.main(
+            [
+                "relabel",
+                "--db",
+                str(path),
+                "--hour",
+                str(h),
+                "--portfolio",
+                "P",
+                "--strategy",
+                "beta",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+    assert (
+        journal_tool.main(
+            [
+                "relabel",
+                "--db",
+                str(path),
+                "--hour",
+                str((h + 5) % 24),
+                "--portfolio",
+                "P",
+                "--strategy",
+                "beta",
+                "--dry-run",
+            ]
+        )
+        == 1
+    )
+    assert journal_tool.main(
+        [
+            "relabel",
+            "--db",
+            str(path),
+            "--hour",
+            str((h + 2) % 24),
+            "--tz",
+            "Europe/Rome",
+            "--portfolio",
+            "P",
+            "--strategy",
+            "beta",
+            "--dry-run",
+        ]
+    ) in (0, 1)

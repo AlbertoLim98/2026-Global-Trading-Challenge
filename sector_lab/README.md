@@ -113,7 +113,7 @@ righe di quelle esecuzioni (vince l'ultima assegnazione). Corregge l'etichetta, 
 eseguito sul conto.
 
 ```bash
-uv run python sector_lab/journal_tool.py list    --db sector_lab/journal.db   # esecuzioni, ora locale, modalità registrata
+uv run python sector_lab/journal_tool.py list    --db sector_lab/journal.db   # esecuzioni, ora (UTC), modalità registrata
 uv run python sector_lab/journal_tool.py relabel --db sector_lab/journal.db --hour 17 \
     --portfolio "Portafoglio 17" --strategy beta --dry-run                       # anteprima
 uv run python sector_lab/journal_tool.py relabel --db sector_lab/journal.db --hour 17 \
@@ -122,8 +122,10 @@ uv run python sector_lab/journal_tool.py relabel --db sector_lab/journal.db --ho
     --portfolio "Portafoglio 18" --strategy quality
 ```
 
-Selezione: `--hour` (ora locale, fuso `--tz`, default Europe/Rome; con `--date AAAA-MM-GG` per un
-giorno), `--run-id` (ripetibile) oppure `--all`.
+Selezione: `--hour` (ora di avvio di esecuzioni **già registrate**, letta in UTC come nell'Excel; con
+`--tz` si cambia fuso, con `--date AAAA-MM-GG` si limita a un giorno), `--run-id` (ripetibile) oppure
+`--all`. L'ora serve solo a scegliere righe già scritte: il programma non pianifica né forza mai i
+ribilanciamenti, che partono solo quando premi il pulsante.
 
 **Titoli non negoziabili:** a ogni ribilanciamento il programma chiede ad Alpaca l'elenco delle azioni
 attive e negoziabili ed esclude dall'elenco quelle che non lo sono (fusi, ritirati, sospesi: es. un
