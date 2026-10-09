@@ -235,3 +235,158 @@ def test_glitchy_history_does_not_produce_absurd_returns_and_is_reported():
     txt = cp.report(res)
     assert "ATTENZIONE: scartati 2 punti anomali dallo storico di B" in txt
     assert isinstance(pd.Series(b["history"]).min(), float) and b["history"].min() > 0
+
+
+# --- curva del patrimonio campionata dal programma (indipendente dallo storico di Alpaca) ----------------
+def _curve_journal(path, name, start, points, step=5, base=1_000_000.0, drift=10.0):
+    """Journal con una curva del patrimonio già campionata (un punto ogni `step` minuti)."""
+    import pandas as pd
+
+    j = journal_mod.Journal(path, name, "beta")
+    with j._db:
+        for k in range(points):
+            ts = (start + pd.Timedelta(minutes=step * k)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            j._db.execute(
+                "INSERT INTO equity_curve (ts, equity, cash, n_positions, portfolio, strategy) VALUES (?,?,?,?,?,?)",
+                (ts, base + drift * k, 1.0, 5, name, "beta"),
+            )
+    return path
+
+
+def test_equity_curve_is_logged_append_only_and_read_back(tmp_path):
+    import sqlite3
+
+    j = journal_mod.Journal(tmp_path / "c.db", "P", "short")
+    j.log_equity(1_000_000.0, 30_000.0, 20)
+    j.log_equity(1_001_500.0, 29_000.0, 20)
+    curve = j.equity_curve()
+    assert [c["equity"] for c in curve] == [1_000_000.0, 1_001_500.0] and curve[0][
+        "portfolio"
+    ] == "P"
+    with pytest.raises(sqlite3.DatabaseError):
+        j._db.execute("UPDATE equity_curve SET equity = 1")
+    with pytest.raises(sqlite3.DatabaseError):
+        j._db.execute("DELETE FROM equity_curve")
+
+
+def test_desk_snapshots_equity_before_and_after_a_rebalance_and_survives_a_dead_broker(tmp_path):
+    import broker as broker_mod
+    import data
+    import desk as desk_mod
+    import server
+
+    state = server.State(True, "iex")
+    syms = [*data.load_universe().ticker, data.STOCK_BENCHMARK, *data.SECTORS, data.BENCHMARK]
+    prices = {k: float(v["close"].iloc[-1]) for k, v in data.demo_bars(syms).items()}
+    br = broker_mod.DemoBroker(1_000_000.0, prices)
+    d = desk_mod.Desk(
+        state, br, journal_mod.Journal(tmp_path / "e.db", "P", "quality"), settle_seconds=0
+    )
+    d.run("quality", 1_000_000)
+    curve = d.journal.equity_curve()
+    assert (
+        len(curve) == 2
+        and curve[0]["equity"] == pytest.approx(1_000_000.0)
+        and curve[1]["n_positions"] > 0
+    )
+    assert (
+        d.snapshot_equity() == pytest.approx(br.account()["equity"])
+        and len(d.journal.equity_curve()) == 3
+    )
+
+    def boom():
+        raise RuntimeError("rete")
+
+    br.account = boom
+    assert d.snapshot_equity() is None and len(d.journal.equity_curve()) == 3
+
+
+def test_journal_curve_is_read_resampled_and_preferred_when_it_has_enough_points(tmp_path):
+    import pandas as pd
+
+    t0 = pd.Timestamp("2026-10-09 14:23")
+    a = _curve_journal(tmp_path / "a.db", "A", t0, 40, 5, drift=20.0)
+    b = _curve_journal(tmp_path / "b.db", "B", t0, 40, 5, drift=-5.0)
+    raw = cp.journal_curve(a)
+    assert (
+        len(raw) == 40 and raw.index[0] == t0 and raw.iloc[-1] == pytest.approx(1_000_000 + 20 * 39)
+    )
+    r15 = cp.resample_curve(raw, "15Min")
+    assert r15.index.freqstr in ("15min", "15T") or len(r15) < len(raw)
+    assert (r15.index.minute % 15 == 0).all() and cp.resample_curve(
+        pd.Series(dtype=float), "15Min"
+    ).empty
+    ba, bb = cp._demo_brokers()
+    sa, sb = cp.snapshot(ba, "A", "1M"), cp.snapshot(bb, "B", "1M")
+    assert cp._choose_history(sa, sb, [a], [b], "auto", "15Min", t0) == "journal"
+    assert sa["history"].index.equals(sb["history"].index) and sa["dropped"] == []
+    res = cp.compare(sa, sb, start=t0, ppy=252 * 26)
+    assert (
+        res["window"]["a"]["total_return"] > 0 > res["window"]["b"]["total_return"]
+    )  # le curve vere
+
+
+def test_alpaca_history_is_used_when_the_journal_has_too_few_points_or_when_forced(
+    tmp_path, capsys
+):
+    import pandas as pd
+
+    t0 = pd.Timestamp("2026-10-09 14:23")
+    few = _curve_journal(tmp_path / "f.db", "F", t0, 2)
+    many = _curve_journal(tmp_path / "m.db", "M", t0, 40)
+    ba, bb = cp._demo_brokers()
+    sa, sb = cp.snapshot(ba, "A", "1M"), cp.snapshot(bb, "B", "1M")
+    assert cp._choose_history(sa, sb, [many], [few], "auto", "15Min", t0) == "alpaca"
+    assert "da Alpaca" in capsys.readouterr().out
+    assert cp._choose_history(sa, sb, [many], [many], "alpaca", "15Min", t0) == "alpaca"
+    assert (
+        cp._choose_history(sa, sb, [many], [few], "journal", "15Min", t0) == "alpaca"
+    )  # avviso su stderr
+    assert "insufficiente" in capsys.readouterr().err
+    assert cp._choose_history(sa, sb, None, None, "auto", "1D", None) == "alpaca"
+    assert cp.journal_curve(tmp_path / "manca.db").empty and cp.journal_curve(None).empty
+
+
+def test_raw_history_report_shows_what_alpaca_returned(capsys):
+    raw = {
+        "timestamp": [f"2026-10-09T14:{m:02d}" for m in range(0, 40, 2)],
+        "equity": [1_000_000.0] * 18 + [-1857.0, None],
+        "profit_loss": [0.0] * 20,
+        "profit_loss_pct": [0.0] * 20,
+        "base_value": 1_000_000.0,
+    }
+    txt = cp._raw_report("1g", raw)
+    assert (
+        "20 punti" in txt
+        and "punti <= 0: 1" in txt
+        and "altri 5 punti" in txt
+        and "base_value 1000000.0" in txt
+    )
+
+
+def test_cli_debug_history_prints_the_raw_series(tmp_path, capsys):
+    assert cp.main(["--demo", "--debug-history", "--out", str(tmp_path / "d.xlsx")]) == 0
+    out = capsys.readouterr().out
+    assert out.count("== Storico grezzo di") == 2 and "profit_loss_pct" in out
+
+
+def test_cli_record_appends_the_current_equity_to_the_journals(tmp_path, capsys):
+    ja, jb = tmp_path / "a.db", tmp_path / "b.db"
+    journal_mod.Journal(ja, "A", "beta")
+    journal_mod.Journal(jb, "B", "short")
+    argv = [
+        "--demo",
+        "--record",
+        "--journal-a",
+        str(ja),
+        "--journal-b",
+        str(jb),
+        "--out",
+        str(tmp_path / "o.xlsx"),
+    ]
+    assert cp.main(argv) == 0 and cp.main(argv) == 0
+    assert (
+        len(journal_mod.Journal(ja).equity_curve()) == 2
+        and len(journal_mod.Journal(jb).equity_curve()) == 2
+    )
+    assert "registrato in" in capsys.readouterr().out

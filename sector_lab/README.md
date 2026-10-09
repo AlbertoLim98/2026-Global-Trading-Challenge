@@ -195,6 +195,13 @@ primo ordine eseguito del portafoglio più recente (`--from` per scegliere un al
 uv run python sector_lab/compare_portfolios.py --env-a .env.p17 --env-b .env.p18 --name-a "Portafoglio beta" --name-b "Portafoglio 1g" --journal-a sector_lab/journal_beta.db --journal-b sector_lab/journal_1g.db --period 1W --timeframe 15Min
 ```
 
+**Curva del patrimonio affidabile.** Lo storico del patrimonio di Alpaca può contenere punti anomali (soprattutto
+su conti azzerati o appena ricreati). Per questo ogni istanza del programma registra nel proprio journal il
+patrimonio del conto ogni 5 minuti (`--sample-minutes`, 0 per disattivare) e prima e dopo ogni ribilanciamento;
+`compare_portfolios.py` usa questa curva quando ha almeno 3 punti per entrambi i portafogli nella finestra
+(`--history-source auto|journal|alpaca`). Se l'app non resta aperta, `--record` aggiunge il patrimonio attuale
+ai journal a ogni lancio dello script. `--debug-history` mostra lo storico grezzo di Alpaca.
+
 La volatilità è annualizzata in base alla granularità scelta (1D, 1H, 15Min, 5Min, 1Min). Con pochi giorni di storico le
 differenze possono essere solo rumore.
 

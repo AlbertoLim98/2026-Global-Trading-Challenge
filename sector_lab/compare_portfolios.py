@@ -56,6 +56,46 @@ def credentials(path: str | Path) -> tuple[str, str]:
     return key, secret
 
 
+def _empty_curve() -> pd.Series:
+    return pd.Series(dtype=float, index=pd.DatetimeIndex([]))
+
+
+def journal_curve(paths: str | Path | list | tuple | None) -> pd.Series:
+    """Curva del patrimonio campionata dal programma e salvata nel journal (tabella equity_curve), in sola lettura."""
+    if not paths:
+        return _empty_curve()
+    if isinstance(paths, (str, Path)):
+        paths = [paths]
+    parts = []
+    for path in paths:
+        if not Path(path).exists():
+            continue
+        db = sqlite3.connect(f"file:{Path(path).as_posix()}?mode=ro", uri=True)
+        try:
+            rows = db.execute(
+                "SELECT ts, equity FROM equity_curve WHERE equity > 0 ORDER BY ts, id"
+            ).fetchall()
+        except sqlite3.DatabaseError:
+            rows = []  # journal senza la tabella (versione vecchia)
+        finally:
+            db.close()
+        if rows:
+            s = pd.Series({pd.Timestamp(t).tz_localize(None): float(e) for t, e in rows})
+            parts.append(s)
+    if not parts:
+        return _empty_curve()
+    out = pd.concat(parts).sort_index()
+    return out[~out.index.duplicated(keep="last")]
+
+
+def resample_curve(s: pd.Series, timeframe: str) -> pd.Series:
+    """Porta la curva campionata (irregolare) sulla griglia del timeframe scelto, ultimo valore di ogni intervallo."""
+    if s.empty:
+        return s
+    rule = "1D" if timeframe == "1D" else f"{MINUTES[timeframe]}min"
+    return s.resample(rule).last().dropna()
+
+
 def clean_equity(s: pd.Series, max_dev: float = 0.5) -> tuple[pd.Series, list[float]]:
     """Toglie dallo storico i punti impossibili (patrimonio <= 0 o oltre `max_dev` dalla mediana).
 
@@ -601,6 +641,24 @@ def main(argv: list[str] | None = None) -> int:
         help="inizio della finestra di confronto (AAAA-MM-GG o AAAA-MM-GGTHH:MM, UTC). Default: il primo ordine\n"
         "eseguito del portafoglio più recente (se si indicano i journal), altrimenti il primo giorno in comune",
     )
+    ap.add_argument(
+        "--history-source",
+        default="auto",
+        choices=["auto", "journal", "alpaca"],
+        help="da dove leggere l'andamento del patrimonio: 'journal' = campionato dal programma (affidabile),\n"
+        "'alpaca' = storico di Alpaca, 'auto' (default) = journal se ha abbastanza punti per entrambi",
+    )
+    ap.add_argument(
+        "--record",
+        action="store_true",
+        help="registra nel journal (il primo di ciascun portafoglio) il patrimonio attuale del conto: utile se\n"
+        "l'app non resta sempre aperta, lancia lo script a fine seduta per costruire la curva",
+    )
+    ap.add_argument(
+        "--debug-history",
+        action="store_true",
+        help="stampa lo storico del patrimonio esattamente come lo restituisce Alpaca (per capire i dati anomali)",
+    )
     ap.add_argument("--feed", default="iex")
     ap.add_argument(
         "--out", help="file Excel di output (default confronto_portafogli_AAAA-MM-GG.xlsx)"
@@ -623,8 +681,20 @@ def main(argv: list[str] | None = None) -> int:
                 "ATTENZIONE: i due file contengono le stesse chiavi (stesso conto).",
                 file=sys.stderr,
             )
+    if a.debug_history:
+        for br, nm in zip(brokers, (a.name_a, a.name_b), strict=True):
+            print(_raw_report(nm, br.portfolio_history_raw(a.period, a.timeframe)))
     sa = snapshot(brokers[0], a.name_a, a.period, creds_a, a.timeframe)
     sb = snapshot(brokers[1], a.name_b, a.period, creds_b, a.timeframe)
+    if a.record:
+        from journal import Journal
+
+        for snap, paths in ((sa, a.journal_a), (sb, a.journal_b)):
+            if paths:
+                Journal(paths[0]).log_equity(
+                    snap["account"]["equity"], snap["account"]["cash"], len(snap["positions"])
+                )
+                print(f"Patrimonio di {snap['name']} registrato in {paths[0]}")
     ja, jb = journal_summary(a.journal_a), journal_summary(a.journal_b)
     fills = [
         pd.Timestamp(j["first_fill"]).tz_localize(None) if j.get("first_fill") else None
@@ -640,6 +710,7 @@ def main(argv: list[str] | None = None) -> int:
     if start is not None:
         print(f"Finestra di confronto dal {_fmt_ts(start)} UTC "
               f"({'indicata da te' if a.from_ else 'primo ordine eseguito del portafoglio più recente'})\n")  # fmt: skip
+    _choose_history(sa, sb, a.journal_a, a.journal_b, a.history_source, a.timeframe, start)
     spy_from = (
         start
         if start is not None
@@ -658,6 +729,52 @@ def main(argv: list[str] | None = None) -> int:
     to_excel(res, ja, jb, out)
     print(f"\nExcel scritto in {out}")
     return 0
+
+
+def _choose_history(sa, sb, ja_paths, jb_paths, source, timeframe, start) -> str:
+    """Sceglie l'andamento del patrimonio: curva del journal (se c'è per entrambi) o storico di Alpaca."""
+    if source != "alpaca":
+        ca = resample_curve(journal_curve(ja_paths), timeframe)
+        cb = resample_curve(journal_curve(jb_paths), timeframe)
+        if start is not None and len(ca) and len(cb):
+            ca, cb = ca[ca.index >= start], cb[cb.index >= start]
+        if len(ca) >= 3 and len(cb) >= 3:
+            sa["history"], sb["history"] = ca, cb
+            sa["dropped"] = sb["dropped"] = []
+            print("Andamento del patrimonio: dal journal (campionato dal programma)\n")
+            return "journal"
+        if source == "journal":
+            print(
+                f"ATTENZIONE: curva del journal insufficiente ({len(ca)} e {len(cb)} punti): uso Alpaca.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "Andamento del patrimonio: da Alpaca (nel journal non ci sono ancora abbastanza campioni)\n"
+            )
+    else:
+        print("Andamento del patrimonio: da Alpaca\n")
+    return "alpaca"
+
+
+def _raw_report(name: str, raw: dict) -> str:
+    """Prime righe dello storico grezzo di Alpaca e un riepilogo (per diagnosticare valori anomali)."""
+    eq = [e for e in raw["equity"] if e is not None]
+    L = [
+        f"== Storico grezzo di {name}: {len(raw['timestamp'])} punti, base_value {raw.get('base_value')}"
+    ]
+    if eq:
+        srt = sorted(eq)
+        L.append(f"   patrimonio: min {srt[0]:,.2f}  mediana {srt[len(srt) // 2]:,.2f}  max {srt[-1]:,.2f}  "
+                 f"(punti <= 0: {sum(e <= 0 for e in eq)})")  # fmt: skip
+    L.append(f"   {'timestamp':<18}{'equity':>16}{'profit_loss':>14}{'profit_loss_pct':>17}")
+    pl, pp = raw.get("profit_loss") or [], raw.get("profit_loss_pct") or []
+    for i, t in enumerate(raw["timestamp"][:15]):
+        g = lambda arr, i=i: "-" if i >= len(arr) or arr[i] is None else f"{arr[i]:,.4f}"
+        L.append(f"   {t:<18}{g(raw['equity']):>16}{g(pl):>14}{g(pp):>17}")
+    if len(raw["timestamp"]) > 15:
+        L.append(f"   ... altri {len(raw['timestamp']) - 15} punti")
+    return "\n".join(L) + "\n"
 
 
 def _demo_brokers():

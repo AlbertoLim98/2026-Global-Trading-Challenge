@@ -435,6 +435,13 @@ def main() -> None:
     )
     ap.add_argument("--env", default=None, help="file con le chiavi Alpaca (default: .env)")
     ap.add_argument(
+        "--sample-minutes",
+        type=float,
+        default=5,
+        help="ogni quanti minuti registrare nel journal il patrimonio del conto (0 = mai). Serve a confrontare\n"
+        "i portafogli con una curva affidabile, indipendente dallo storico di Alpaca",
+    )
+    ap.add_argument(
         "--journal", default=None, help="percorso del journal (default dedotto dal nome)"
     )
     a = ap.parse_args()
@@ -473,6 +480,15 @@ def main() -> None:
         except journal_mod.JournalAccountError as e:
             sys.exit(f"{e}\nJournal: {jpath}")
     desk = desk_mod.Desk(state, broker, journal, portfolio=a.portfolio, strategy=a.strategy)
+    if a.sample_minutes > 0:
+        stop = threading.Event()
+
+        def sampler() -> None:
+            desk.snapshot_equity()
+            while not stop.wait(a.sample_minutes * 60):
+                desk.snapshot_equity()
+
+        threading.Thread(target=sampler, daemon=True).start()
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(state, desk, a.port))
     url = f"http://127.0.0.1:{a.port}"
     label = f" · {a.portfolio}" if a.portfolio else ""

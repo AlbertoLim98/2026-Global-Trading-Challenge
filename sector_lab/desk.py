@@ -70,6 +70,16 @@ class Desk:
             "broker": self.broker.name,
         }
 
+    def snapshot_equity(self) -> float | None:
+        """Registra nel journal il patrimonio attuale del conto; None se il conto non risponde."""
+        try:
+            acct = self.broker.account()
+            n = len(self.broker.positions())
+        except Exception:  # noqa: BLE001 - il campionamento non deve mai fermare il programma
+            return None
+        self.journal.log_equity(acct["equity"], acct["cash"], n)
+        return float(acct["equity"])
+
     def _label(self, acct: dict) -> str:
         """Nome del portafoglio: quello dato all'avvio, altrimenti il numero del conto Alpaca."""
         return self.portfolio_name or f"Conto {acct.get('account_number') or self.broker.name}"
@@ -176,7 +186,9 @@ class Desk:
         )  # tutti gli indicatori che hanno composto i punteggi
         for pr in res["proposals"]:
             self.journal.add_proposal(run_id, pr)
+        self.snapshot_equity()  # patrimonio prima degli ordini
         outcome = self._execute_all([pr["id"] for pr in res["proposals"]])
+        self.snapshot_equity()  # e dopo
         return {
             "run_id": run_id,
             "portfolio": label,

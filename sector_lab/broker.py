@@ -186,6 +186,23 @@ class AlpacaBroker:
             if eq
         ]
 
+    def portfolio_history_raw(self, period: str = "1M", timeframe: str = "1D") -> dict:
+        """Storico del patrimonio esattamente come lo restituisce Alpaca (per diagnosticare dati anomali)."""
+        from alpaca.trading.requests import GetPortfolioHistoryRequest
+
+        req = GetPortfolioHistoryRequest(period=period, timeframe=timeframe)
+        h = with_retry(lambda: self._t.get_portfolio_history(req))
+        return {
+            "timestamp": [
+                datetime.fromtimestamp(t, tz=UTC).strftime("%Y-%m-%dT%H:%M")
+                for t in h.timestamp or []
+            ],
+            "equity": list(h.equity or []),
+            "profit_loss": list(h.profit_loss or []),
+            "profit_loss_pct": list(h.profit_loss_pct or []),
+            "base_value": h.base_value,
+        }
+
     def cancel_order(self, order_id: str) -> str:
         """Annulla un ordine aperto. Esito: canceled | not_found (conto diverso o azzerato) | not_cancelable."""
         from alpaca.common.exceptions import APIError
@@ -315,6 +332,16 @@ class DemoBroker:
         self, period: str = "1M", timeframe: str = "1D"
     ) -> list[tuple[str, float]]:
         return list(getattr(self, "history", []))  # serie di prova (data, patrimonio)
+
+    def portfolio_history_raw(self, period: str = "1M", timeframe: str = "1D") -> dict:
+        h = list(getattr(self, "history", []))
+        return {
+            "timestamp": [t for t, _ in h],
+            "equity": [e for _, e in h],
+            "profit_loss": [],
+            "profit_loss_pct": [],
+            "base_value": 1_000_000.0,
+        }
 
     def cancel_order(self, order_id: str) -> str:
         for o in self.orders.values():

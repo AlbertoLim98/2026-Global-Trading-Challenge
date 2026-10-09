@@ -41,6 +41,19 @@ CREATE TABLE IF NOT EXISTS indicators (
     target_value REAL,
     data TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS equity_curve (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    equity REAL NOT NULL,
+    cash REAL,
+    n_positions INTEGER,
+    portfolio TEXT,
+    strategy TEXT
+);
+CREATE TRIGGER IF NOT EXISTS equity_no_update BEFORE UPDATE ON equity_curve
+BEGIN SELECT RAISE(ABORT, 'journal append-only'); END;
+CREATE TRIGGER IF NOT EXISTS equity_no_delete BEFORE DELETE ON equity_curve
+BEGIN SELECT RAISE(ABORT, 'journal append-only'); END;
 CREATE TABLE IF NOT EXISTS journal_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -114,6 +127,21 @@ class Journal:
             for c in ("portfolio", "strategy"):
                 if c not in cols:
                     self._db.execute(f"ALTER TABLE events ADD COLUMN {c} TEXT")
+
+    def log_equity(
+        self, equity: float, cash: float | None = None, n_positions: int | None = None
+    ) -> None:
+        """Registra il patrimonio del conto in questo istante (curva campionata dal programma, affidabile)."""
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT INTO equity_curve (ts, equity, cash, n_positions, portfolio, strategy) VALUES (?,?,?,?,?,?)",
+                (iso(now()), float(equity), cash, n_positions, self.portfolio, self.strategy),
+            )
+
+    def equity_curve(self) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute("SELECT * FROM equity_curve ORDER BY ts, id").fetchall()
+        return [dict(r) for r in rows]
 
     def bind_account(self, account_number: str | None) -> None:
         """Lega il journal a un conto Alpaca; rifiuta un conto diverso (evita di mescolare due portafogli)."""
