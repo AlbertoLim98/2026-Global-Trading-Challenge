@@ -1,6 +1,6 @@
 """Orchestrazione del ribilanciamento: tabelle -> target -> operazioni -> invio automatico -> journal.
 
-Premendo "Avvia ribilanciamento" (o "Controlla stop") le operazioni calcolate vengono inviate da sole
+Premendo "Avvia ribilanciamento" le operazioni calcolate vengono inviate da sole
 al conto paper: prima le vendite, poi gli acquisti. Non c'è un passaggio di approvazione per singola
 operazione. Ogni operazione non andata a buon fine (ordine rifiutato, annullato, scaduto, eseguito
 solo in parte, errore del broker) viene segnalata e si può riposizionare a prezzo attuale.
@@ -17,10 +17,8 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import data
-import metrics
 import portfolio
-import shortterm
-from journal import Journal, now
+from journal import STRATEGY_LABEL, Journal, now
 
 NY = ZoneInfo("America/New_York")
 SETTLE_SECONDS = 15  # attesa massima dell'esito delle vendite prima di inviare gli acquisti
@@ -62,35 +60,6 @@ class Desk:
     def _positions(self) -> dict[str, dict]:
         return {p["symbol"]: p for p in self.broker.positions() if p["qty"] > 0}
 
-    def _stop_data(self, symbols: list[str]) -> tuple[dict[str, float], dict[str, bool]]:
-        """ATR(14) e trend (prezzo sopra la media a 50 giorni) di ogni titolo, dai dati giornalieri."""
-        if not symbols:
-            return {}, {}
-        atrs: dict[str, float] = {}
-        bull: dict[str, bool] = {}
-        for s, df in self.state.fetch_bars(symbols).items():
-            v = metrics.atr(df).iloc[-1]
-            if not math.isnan(v):
-                atrs[s] = float(v)
-            if len(df) >= shortterm.SMA_N:
-                bull[s] = bool(df["close"].iloc[-1] > df["close"].tail(shortterm.SMA_N).mean())
-        return atrs, bull
-
-    def _atrs(self, symbols: list[str]) -> dict[str, float]:
-        return self._stop_data(symbols)[0]
-
-    def _strategy(self) -> str:
-        """Strategia in uso: quella fissa del portafoglio, altrimenti quella dell'ultima riallocazione."""
-        if self.strategy:
-            return self.strategy
-        runs = self.journal.runs()
-        return (runs[-1]["strategy"] if runs else None) or "quality"
-
-    def _short_stops(self, symbols: list[str], bull: dict[str, bool]) -> dict[str, float]:
-        """Stop per titolo della strategia a 1 giorno: quello fissato all'acquisto, altrimenti dal trend attuale."""
-        entry = self.journal.entry_stop_mults()
-        return {s: entry.get(s) or shortterm.stop_multiplier(bull.get(s, True)) for s in symbols}
-
     # --- ribilanciamento giornaliero ---------------------------------------------------------------
     def info(self) -> dict:
         return {
@@ -99,6 +68,10 @@ class Desk:
             "locked": self.strategy is not None,
             "broker": self.broker.name,
         }
+
+    def _label(self, acct: dict) -> str:
+        """Nome del portafoglio: quello dato all'avvio, altrimenti il numero del conto Alpaca."""
+        return self.portfolio_name or f"Conto {acct.get('account_number') or self.broker.name}"
 
     def run(self, mode: str = "quality", capital: float = 1_000_000.0) -> dict:
         mode = (
@@ -122,13 +95,11 @@ class Desk:
         tradable = self.state.tradable(refresh=True)
         positions = self._positions()
         held_managed = [s for s in positions if s in self.managed]
-        atrs, bull = self._stop_data(held_managed)
         if mode == "short":
             view = self.state.short_view(refresh=True)
             sectors = {"sectors": [], "feed": view["feed"]}
             by_etf: dict[str, dict] = {}
             tg = portfolio.build_targets_short(view["rows"], p)
-            stop_mults = self._short_stops(held_managed, bull)
         else:
             view = None
             sectors = self.state.sectors(refresh=True)
@@ -136,12 +107,11 @@ class Desk:
                 etf: self.state.stock_ranking(etf, refresh=True, mode=mode) for etf in data.SECTORS
             }
             tg = portfolio.build_targets(sectors["sectors"], by_etf, p)
-            stop_mults = None
         need = sorted(set(tg["targets"]) | set(held_managed))
         prices = self.broker.latest_prices(need) if need else {}
         acct = self.broker.account()
         res = portfolio.build_proposals(
-            tg["targets"], positions, prices, atrs, self.managed, acct["cash"], p, stop_mults
+            tg["targets"], positions, prices, self.managed, acct["cash"], p
         )
         res["notes"] = [*tg["notes"], *res["notes"]]
         if tradable is not None:
@@ -158,12 +128,26 @@ class Desk:
                 f"({capital:,.0f}$): gli acquisti sono limitati dalla liquidità disponibile"
             )
 
+        # su quale portafoglio entrano le posizioni e con quale strategia sono state calcolate:
+        # scritto in ogni evento del journal e in ogni operazione
+        label = self._label(acct)
+        self.journal.set_context(label, mode)
+        for pr in res["proposals"]:
+            pr |= {
+                "portfolio": label,
+                "strategy": mode,
+                "strategy_label": STRATEGY_LABEL[mode],
+                "account_number": acct.get("account_number"),
+            }
         superseded = self.journal.supersede_failed(run_id)
         self.journal.log(
             "RUN",
             {
                 "params": p.as_dict(),
-                "portfolio": self.portfolio_name,
+                "portfolio": label,
+                "strategy": mode,
+                "strategy_label": STRATEGY_LABEL[mode],
+                "account_number": acct.get("account_number"),
                 "broker": self.broker.name,
                 "account": acct,
                 "sector_table": [_slim_sector(r) for r in sectors["sectors"]],
@@ -184,6 +168,8 @@ class Desk:
         outcome = self._execute_all([pr["id"] for pr in res["proposals"]])
         return {
             "run_id": run_id,
+            "portfolio": label,
+            "strategy": mode,
             "params": p.as_dict(),
             "account": acct,
             "sector_budgets": tg["sectors"],
@@ -193,43 +179,9 @@ class Desk:
             "outcome": outcome,
         }
 
-    # --- controllo stop (senza rifare le tabelle) -----------------------------------------------------
-    def stop_check(self) -> dict:
-        self.refresh_orders()
-        positions = {s: x for s, x in self._positions().items() if s in self.managed}
-        atrs, bull = self._stop_data(list(positions))
-        p = portfolio.Params()
-        mults = self._short_stops(list(positions), bull) if self._strategy() == "short" else {}
-        active = {
-            x["symbol"] for x in self.journal.proposals(("submitted",)) if x["kind"] == "STOP"
-        }
-        run_id = now().strftime("%Y%m%d-%H%M%S-stop")
-        new = []
-        for sym, pos in positions.items():
-            mult = mults.get(sym, p.atr_stop_mult)
-            loss = portfolio.stop_hit(pos, atrs.get(sym), mult)
-            if loss is None or sym in active:
-                continue
-            info = self.managed[sym]
-            atr = atrs[sym]
-            new.append(
-                portfolio._proposal(
-                    "STOP", "sell", sym, info["name"], info["sector"], pos["qty"], pos["price"],
-                    f"Perdita {loss:.2f}$/azione ({loss / pos['avg_entry']:.1%}) > "
-                    f"{mult:g} ATR ({atr:.2f}$): vendita per stop",
-                    atr=atr, loss_per_share=loss, avg_entry=pos["avg_entry"],
-                    stop_mult=mult,
-                )
-            )  # fmt: skip
-        self.journal.log("STOP_CHECK", {"n_positions": len(positions), "n_new": len(new)}, run_id)
-        for pr in new:
-            self.journal.add_proposal(run_id, pr)
-        outcome = self._execute_all([pr["id"] for pr in new])
-        return {"n_positions": len(positions), "n_new": len(new), "outcome": outcome}
-
     # --- invio degli ordini --------------------------------------------------------------------------
     def _execute_all(self, ids: list[str]) -> dict:
-        """Invia tutte le operazioni: prima stop e vendite, poi (a vendite concluse) gli acquisti."""
+        """Invia tutte le operazioni: prima le vendite, poi (a vendite concluse) gli acquisti."""
         props = [self.journal.get_proposal(i) for i in ids]
         sells = [x["id"] for x in props if x["side"] == "sell"]
         buys = [x["id"] for x in props if x["side"] == "buy"]
@@ -431,6 +383,8 @@ class Desk:
                     "price": price,
                     "value": qty * price,
                     "order_type": pr.get("order_type", "market"),
+                    "portfolio": pr.get("portfolio"),
+                    "strategy": pr.get("strategy"),
                     "reason": pr["reason"],
                 }
             )
@@ -481,8 +435,11 @@ class Desk:
             )
         opening = self.journal.opening()
         base = opening["equity"] if opening else None
+        runs = self.journal.runs()
         return {
             "broker": self.broker.name,
+            "label": self._label(acct),
+            "strategy": self.strategy or (runs[-1]["strategy"] if runs else None),
             "account": acct,
             "cash_weight": acct["cash"] / equity if equity else 0.0,
             "day_pl": day_pl,
@@ -519,7 +476,6 @@ def _slim_short(r: dict) -> dict:
             "atr",
             "beta",
             "trend_label",
-            "stop_mult",
             "total",
             "pillars",
         )

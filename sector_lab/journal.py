@@ -286,18 +286,9 @@ class Journal:
             )
         return out
 
-    def entry_stop_mults(self) -> dict[str, float]:
-        """Moltiplicatore ATR dello stop fissato all'acquisto: ultimo acquisto eseguito di ogni titolo."""
-        with self._lock:
-            rows = self._db.execute(
-                "SELECT data FROM proposals WHERE status IN ('filled', 'submitted') ORDER BY updated ASC"
-            ).fetchall()
-        out: dict[str, float] = {}
-        for r in rows:
-            d = json.loads(r["data"])
-            if d.get("kind") == "BUY" and d.get("stop_mult"):
-                out[d["symbol"]] = float(d["stop_mult"])
-        return out
+    def set_context(self, portfolio: str | None, strategy: str | None) -> None:
+        """Portafoglio e strategia in uso: scritti in ogni evento registrato da qui in avanti."""
+        self.portfolio, self.strategy = portfolio, strategy
 
     def opening(self) -> dict | None:
         """Apertura del portafoglio: data e patrimonio del conto al primo ribilanciamento registrato."""

@@ -54,7 +54,7 @@ scheda, la prima volta, scarica anche gli altri settori. Anche questa lista si s
 
 Il pulsante **Avvia ribilanciamento giornaliero** rigenera le tabelle (settori e aziende, in
 modalità qualità o alto beta), calcola l'allocazione obiettivo su un capitale di 1.000.000$ e
-**invia da solo gli ordini** al conto **paper**: prima stop e vendite (si attende l'esito, fino a
+**invia da solo gli ordini** al conto **paper**: prima le vendite (si attende l'esito, fino a
 15 s), poi gli acquisti, tutti a mercato. Non c'è approvazione per singola operazione: il pulsante
 è l'unico passaggio umano. Se ci sono ordini ancora in corso il nuovo ribilanciamento non parte,
 per non duplicarli.
@@ -77,10 +77,9 @@ Regole dell'algoritmo (`portfolio.py`, parametri in `Params`):
    i filtri; ogni aggiunta è segnalata nelle note del ribilanciamento e nel Journal. Resta più liquidità
    solo se in assoluto non esistono abbastanza titoli;
 3. liquidità minima 3%; gli acquisti si riducono se manca liquidità;
-4. **stop**: perdita per azione > 1 ATR(14) -> vendita completa proposta con priorità massima
-   (pulsante "Controlla stop ATR" per verificarlo durante la giornata senza rifare le tabelle);
-   nessun divieto di riacquisto: se il titolo è ancora in classifica può essere ricomprato;
-5. vendite solo complete (stop, o titolo che esce dalla top 10 o dai filtri), mai parziali: le
+4. **nessuno stop né regola d'uscita** (ATR o altro): si esce solo col ribilanciamento, quando un titolo non
+   è più selezionato; nessun divieto di riacquisto;
+5. vendite solo complete (titolo che esce dalla top 10 o dai filtri), mai parziali: le
    statistiche si rifanno ogni giorno. Un titolo già in portafoglio sotto target viene integrato
    solo se lo scarto supera 2.000$ e il 20% del valore target;
 6. le posizioni fuori dall'universo della strategia non vengono toccate.
@@ -110,9 +109,8 @@ breve periodo** su tutto l'universo, media di 7 pilastri (percentile 0-100 tra i
 Si tengono i **20 titoli** con lo score più alto (peso in proporzione, massimo 10% per titolo, 97% investito).
 Si usa l'ultima seduta completa (la barra di oggi non completa viene scartata).
 
-**Uscita:** stop a **1,5 ATR** se il titolo è rialzista (sopra la media a 50 giorni) all'acquisto, **2,5 ATR**
-se ribassista; il moltiplicatore è fissato all'acquisto e salvato nel journal. Vale solo per questa strategia
-(Qualità e Alto beta restano a 1 ATR).
+**Uscita:** nessuna regola d'uscita (niente stop ATR): si esce solo con il ribilanciamento quotidiano, quando
+un titolo non è più tra i 20 migliori. L'ATR resta solo come unità di misura dentro gli indicatori dello score.
 
 I segni degli indicatori sono **ipotesi**. Il pulsante **Valida gli indicatori sullo storico** (e l'Excel con
 validazione) misura, su circa un anno di dati giornalieri, quanto ogni indicatore prevede il rendimento del
@@ -158,6 +156,11 @@ ribilanciamenti, che partono solo quando premi il pulsante.
 attive e negoziabili ed esclude dall'elenco quelle che non lo sono (fusi, ritirati, sospesi: es. un
 errore "asset WBD is not active"). Vale anche per la scheda Aziende. Dopo un errore di questo tipo
 rilancia il ribilanciamento: il titolo sarà escluso e il suo importo ridistribuito.
+
+**Su che portafoglio e con quale strategia.** Ogni evento del journal e ogni operazione portano il nome del
+portafoglio (quello dato con `--portfolio`, altrimenti `Conto <numero del conto Alpaca>`) e la strategia usata per
+calcolare le posizioni di quel ribilanciamento (`quality`, `beta` o `short`); si vedono nelle schede Journal,
+Portafoglio e Ribilancio e nell'Excel.
 
 Il **Journal** (SQLite `sector_lab/journal.db`, solo accodamento: modifiche e cancellazioni sono
 bloccate) registra ogni esecuzione con le tabelle usate e i target, ogni proposta, decisione,

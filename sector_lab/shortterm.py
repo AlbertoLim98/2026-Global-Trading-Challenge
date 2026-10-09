@@ -21,8 +21,8 @@ Sette pilastri, ognuno è un percentile 0-100 tra i titoli dello stesso giorno (
                   penalizza.
 
 Il segno di ogni indicatore è un'IPOTESI di partenza (vedi COMPONENT_NOTES): `ic_report` misura sui dati
-storici se il segno regge e va riletto prima di fidarsi. Uscita: stop a 1,5 ATR se il titolo è sopra la
-media a 50 giorni all'acquisto (rialzista), 2,5 ATR se è sotto (ribassista).
+storici se il segno regge e va riletto prima di fidarsi. Nessuna regola d'uscita: si esce solo con il
+ribilanciamento quotidiano (l'ATR resta solo come unità di misura dentro gli indicatori).
 """
 
 from __future__ import annotations
@@ -73,12 +73,6 @@ COMPONENT_NOTES = {
 RSI_PERIODS = (2, 3)
 ATR_N, SMA_N, FEW, WEEK, VOL_N, BETA_N = 14, 50, 3, 5, 20, 60
 TOP_N = 20
-STOP_BULL, STOP_BEAR = 1.5, 2.5
-
-
-def stop_multiplier(bullish: bool) -> float:
-    """Moltiplicatore ATR dello stop: stretto (1,5) se il titolo è rialzista, largo (2,5) se ribassista."""
-    return STOP_BULL if bullish else STOP_BEAR
 
 
 def drop_incomplete(df: pd.DataFrame, now: datetime | None = None) -> pd.DataFrame:
@@ -232,7 +226,6 @@ def latest_table(panel: Panel, names: dict[str, str], sector_of: dict[str, str])
                 "beta": None if pd.isna(panel.beta.at[i, s]) else float(panel.beta.at[i, s]),
                 "bullish": bull,
                 "trend_label": "Rialzista" if bull else "Ribassista",
-                "stop_mult": stop_multiplier(bull),
                 "total": float(panel.total.at[i, s]),
                 "pillars": {p: float(panel.pillars[p].at[i, s]) for p in PILLARS},
                 "raw": {

@@ -61,6 +61,7 @@ class AlpacaBroker:
     def account(self) -> dict:
         a = with_retry(self._t.get_account)
         return {
+            "account_number": str(getattr(a, "account_number", "") or ""),
             "equity": float(a.equity),
             "cash": float(a.cash),
             "buying_power": float(a.buying_power),
@@ -180,6 +181,7 @@ class DemoBroker:
     def account(self) -> dict:
         mv = sum(p["qty"] * self.prices.get(s, p["avg_entry"]) for s, p in self.pos.items())
         return {
+            "account_number": "DEMO",
             "equity": self.cash + mv,
             "cash": self.cash,
             "buying_power": self.cash,

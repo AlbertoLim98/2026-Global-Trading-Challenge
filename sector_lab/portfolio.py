@@ -1,6 +1,6 @@
 """Algoritmo di ribilanciamento giornaliero: dalle tabelle (settori + aziende) ai target e alle proposte.
 
-Modulo puro (nessuna rete, nessun ordine): riceve tabelle, posizioni, prezzi e ATR e restituisce
+Modulo puro (nessuna rete, nessun ordine): riceve tabelle, posizioni e prezzi e restituisce
 l'allocazione obiettivo e l'elenco delle proposte di acquisto/vendita. Le proposte non vengono
 eseguite qui: le invia `desk.py`.
 
@@ -11,10 +11,10 @@ Regole (tutte modificabili in `Params`):
      peso proporzionale al punteggio (in modalità alto beta il beta sceglie i titoli, il punteggio li pesa),
      tetto `max_stock` (10%) del capitale per titolo; l'eccedenza passa agli altri titoli.
   4. Riserva di liquidità minima `cash_reserve`.
-  5. Stop: posizione con perdita per azione > `atr_stop_mult` x ATR(14) -> vendita proposta con priorità
-     massima (nessun divieto di riacquisto: se il titolo è ancora in classifica può essere ricomprato).
-  6. Vendite: solo complete (stop, o titolo che esce dalla top 10 / dai filtri). Nessuna vendita parziale:
-     le statistiche si rifanno ogni giorno, quindi un titolo sopra target resta com'è.
+  5. Nessuna regola d'uscita a parte il ribilanciamento: niente stop (ATR o altro). Un titolo esce solo
+     quando, rifatte le statistiche, non è più selezionato.
+  6. Vendite: solo complete (titolo che esce dalla selezione). Nessuna vendita parziale: le statistiche si
+     rifanno ogni giorno, quindi un titolo sopra target resta com'è.
   7. Acquisti: si integra un titolo sotto target solo se lo scarto supera `min_trade` e
      `drift_tolerance` x valore target (evita operazioni inutili ogni giorno).
 Nessuna regola può garantire l'assenza di perdite: riducono il rischio, non lo azzerano.
@@ -37,7 +37,6 @@ class Params:
     min_sector_score: float = 50.0
     min_trade: float = 2_000.0
     drift_tolerance: float = 0.20
-    atr_stop_mult: float = 1.0
     mode: str = "quality"  # "quality" | "beta" | "short"
     short_n: int = (
         20  # strategia a 1 giorno: quanti titoli tenere (i migliori per score di breve periodo)
@@ -211,8 +210,7 @@ def build_targets_short(cands: list[dict], p: Params) -> dict:
     """Strategia a 1 giorno: i `short_n` titoli con lo score di breve periodo più alto, peso in proporzione.
 
     Nessuna struttura per settori: l'unico limite è `max_stock` del capitale per titolo; il 97% viene investito
-    se i titoli sono almeno 10. Ogni titolo porta lo stop (1,5 ATR se rialzista, 2,5 se ribassista) fissato
-    all'acquisto.
+    se i titoli sono almeno 10..
     """
     top = sorted(cands, key=lambda r: -r["total"])[: p.short_n]
     invest = p.capital * (1 - p.cash_reserve)
@@ -228,8 +226,7 @@ def build_targets_short(cands: list[dict], p: Params) -> dict:
             "price": r["price"],
             "score": r["total"],
             "beta": r.get("beta"),
-            "stop_mult": r["stop_mult"],
-            "trend_at_entry": r["trend_label"],
+            "trend": r["trend_label"],
             "tier": "breve termine",
         }
         for r in top
@@ -257,7 +254,7 @@ def _proposal(
 ) -> dict:
     return {
         "id": uuid.uuid4().hex[:12],
-        "kind": kind,  # STOP | SELL | BUY
+        "kind": kind,  # SELL | BUY
         "side": side,
         "symbol": sym,
         "name": name,
@@ -266,28 +263,18 @@ def _proposal(
         "price": price,
         "value": qty * price,
         "reason": reason,
-        "priority": {"STOP": 0, "SELL": 1, "BUY": 2}[kind],
+        "priority": {"SELL": 1, "BUY": 2}[kind],
         **extra,
     }
-
-
-def stop_hit(pos: dict, atr: float | None, mult: float) -> float | None:
-    """Perdita per azione se supera mult x ATR, altrimenti None."""
-    if not atr or atr <= 0:
-        return None
-    loss = pos["avg_entry"] - pos["price"]
-    return loss if loss > mult * atr else None
 
 
 def build_proposals(
     targets: dict[str, dict],
     positions: dict[str, dict],
     prices: dict[str, float],
-    atrs: dict[str, float],
     managed: dict[str, dict],
     cash: float,
     p: Params,
-    stop_mults: dict[str, float] | None = None,
 ) -> dict:
     """Proposte per portare il portafoglio sul target.
 
@@ -296,39 +283,9 @@ def build_proposals(
     """
     props: list[dict] = []
     notes: list[str] = []
-    stopped: set[str] = set()
 
     for sym, pos in positions.items():
         if sym not in managed:
-            continue
-        info = managed[sym]
-        mult = (stop_mults or {}).get(
-            sym, p.atr_stop_mult
-        )  # per titolo (strategia a 1 giorno) o fisso
-        loss = stop_hit(pos, atrs.get(sym), mult)
-        if loss is not None:
-            atr = atrs[sym]
-            stopped.add(sym)
-            props.append(
-                _proposal(
-                    "STOP",
-                    "sell",
-                    sym,
-                    info["name"],
-                    info["sector"],
-                    pos["qty"],
-                    pos["price"],
-                    f"Perdita {loss:.2f}$/azione ({loss / pos['avg_entry']:.1%}) > {mult:g} ATR "
-                    f"({atr:.2f}$): vendita immediata consigliata",
-                    atr=atr,
-                    loss_per_share=loss,
-                    avg_entry=pos["avg_entry"],
-                    stop_mult=mult,
-                )
-            )
-
-    for sym, pos in positions.items():
-        if sym not in managed or sym in stopped:
             continue
         info = managed[sym]
         price = prices.get(sym) or pos["price"]
@@ -355,8 +312,6 @@ def build_proposals(
     held = {s for s, pos in positions.items() if pos["qty"] > 0}
     buys: list[dict] = []
     for sym, tgt in targets.items():
-        if sym in stopped:
-            continue
         price = prices.get(sym) or tgt["price"]
         cur = positions[sym]["qty"] * price if sym in held else 0.0
         delta = tgt["value"] - cur
@@ -377,11 +332,6 @@ def build_proposals(
                     + (f", punteggio {tgt['score']:.0f}" if tgt["score"] is not None else ""),
                     current_value=cur,
                     target_value=tgt["value"],
-                    **(
-                        {"stop_mult": tgt["stop_mult"], "trend_at_entry": tgt["trend_at_entry"]}
-                        if "stop_mult" in tgt
-                        else {}
-                    ),
                 )
             )
 

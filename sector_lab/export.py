@@ -279,8 +279,7 @@ def build_short(view: dict, ic: dict | None = None) -> bytes:
         ("", "Prezzo", lambda r: r["price"], NUM),
         ("", "ATR(14)", lambda r: r["atr"], NUM),
         ("", "Beta 60g vs SPY", lambda r: r["beta"], NUM),
-        ("Stop", "Trend", lambda r: r["trend_label"], None),
-        ("Stop", "Moltiplicatore ATR", lambda r: r["stop_mult"], "0.0"),
+        ("", "Trend", lambda r: r["trend_label"], None),
         *[
             ("Pilastri", label, (lambda r, p=p: r["pillars"][p]), "score")
             for p, label in shortterm.PILLAR_LABEL.items()
@@ -305,7 +304,7 @@ def build_short(view: dict, ic: dict | None = None) -> bytes:
         "Indicatori (segno ipotizzato, da verificare con la validazione storica):",
         *[f"  {k}: {v}" for k, v in shortterm.COMPONENT_NOTES.items()],
         "",
-        "Uscita: stop a 1,5 ATR se il titolo è sopra la media a 50 giorni all'acquisto, 2,5 ATR se è sotto.",
+        "Uscita: nessuna regola d'uscita, si esce solo con il ribilanciamento quotidiano.",
         "Score = percentile 0-100 tra i titoli dello stesso giorno; totale = media dei 7 pilastri.",
     ]
     for i, t in enumerate(lines, 1):

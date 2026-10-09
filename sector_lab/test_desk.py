@@ -144,8 +144,8 @@ def test_cash_exceeds_3_percent_only_when_titles_do_not_exist_at_all():
     assert any("Non ci sono abbastanza titoli" in n for n in t["notes"])
 
 
-def test_proposals_stop_exit_buy_and_unmanaged():
-    managed = {s: {"name": s, "sector": "XLK"} for s in ("STP", "OUT", "NEW")}
+def test_proposals_exit_buy_and_unmanaged_without_any_stop():
+    managed = {s: {"name": s, "sector": "XLK"} for s in ("LOSER", "OUT", "NEW")}
     targets = {
         "NEW": {
             "symbol": "NEW",
@@ -154,29 +154,40 @@ def test_proposals_stop_exit_buy_and_unmanaged():
             "value": 20_000.0,
             "price": 50.0,
             "score": 80,
-        }
+        },
+        "LOSER": {
+            "symbol": "LOSER",
+            "name": "LOSER",
+            "sector": "XLK",
+            "value": 5_000.0,
+            "price": 50.0,
+            "score": 70,
+        },
     }
     pos = {
-        "STP": {"qty": 100, "avg_entry": 100.0, "price": 97.0},  # perdita 3$ > ATR 2$
+        "LOSER": {
+            "qty": 100,
+            "avg_entry": 100.0,
+            "price": 50.0,
+        },  # -50%, ma ancora nel target: nessuno stop
         "OUT": {"qty": 10, "avg_entry": 50.0, "price": 52.0},
         "ZZZ": {"qty": 5, "avg_entry": 10.0, "price": 9.0},  # fuori strategia
     }
-    r = portfolio.build_proposals(
-        targets, pos, {"NEW": 50.0}, {"STP": 2.0, "OUT": 1.0}, managed, 500_000.0, P
-    )
+    r = portfolio.build_proposals(targets, pos, {"NEW": 50.0}, managed, 500_000.0, P)
     by = {(x["kind"], x["symbol"]): x for x in r["proposals"]}
-    assert ("STOP", "STP") in by and by[("STOP", "STP")]["qty"] == 100 and ("SELL", "STP") not in by
     assert ("SELL", "OUT") in by and ("BUY", "NEW") in by and by[("BUY", "NEW")]["qty"] == 400
+    assert not any(
+        x["symbol"] == "LOSER" for x in r["proposals"]
+    )  # la perdita da sola non fa uscire
+    assert not any(x["kind"] == "STOP" for x in r["proposals"])
     assert not any(x["symbol"] == "ZZZ" for x in r["proposals"]) and any(
         "ZZZ" in n for n in r["notes"]
     )
     assert [x["priority"] for x in r["proposals"]] == sorted(x["priority"] for x in r["proposals"])
 
 
-def test_stop_needs_loss_above_one_atr():
-    assert portfolio.stop_hit({"avg_entry": 100, "price": 98.5}, 2.0, 1.0) is None
-    assert portfolio.stop_hit({"avg_entry": 100, "price": 97.9}, 2.0, 1.0) == pytest.approx(2.1)
-    assert portfolio.stop_hit({"avg_entry": 100, "price": 50}, None, 1.0) is None
+def test_atr_stop_has_been_removed():
+    assert not hasattr(portfolio, "stop_hit") and not hasattr(P, "atr_stop_mult")
 
 
 def test_no_partial_sells_for_overweight_titles():
@@ -192,7 +203,7 @@ def test_no_partial_sells_for_overweight_titles():
         }
     }
     pos = {"BIG": {"qty": 500, "avg_entry": 100.0, "price": 100.0}}  # 50k contro target 10k
-    assert portfolio.build_proposals(targets, pos, {}, {}, managed, 100_000.0, P)["proposals"] == []
+    assert portfolio.build_proposals(targets, pos, {}, managed, 100_000.0, P)["proposals"] == []
     assert P.cash_reserve == 0.03
 
 
@@ -219,9 +230,7 @@ def test_buys_scaled_when_cash_short_and_small_drift_ignored():
     pos = {
         "OLD": {"qty": 95, "avg_entry": 100.0, "price": 100.0}
     }  # 9.5k vs 10k: scarto trascurabile
-    r = portfolio.build_proposals(
-        targets, pos, {}, {}, managed, P.cash_reserve * P.capital + 10_000, P
-    )
+    r = portfolio.build_proposals(targets, pos, {}, managed, P.cash_reserve * P.capital + 10_000, P)
     assert [x["symbol"] for x in r["proposals"]] == ["NEW"]
     assert r["proposals"][0]["qty"] == 100 and any(
         "Liquidità insufficiente" in n for n in r["notes"]
@@ -289,16 +298,17 @@ def test_sells_are_sent_before_buys(env):
     assert sym
 
 
-def test_stop_check_sells_automatically(env):
+def test_a_big_loss_does_not_trigger_any_exit_only_the_rebalance_decides(env):
     desk, broker, prices = env
-    sym = next(s for s in data.load_universe().ticker if s in prices)
-    broker.pos[sym] = {"qty": 50.0, "avg_entry": prices[sym] * 1.5}  # perdita enorme: oltre 1 ATR
-    res = desk.stop_check()
-    assert res["n_new"] == 1 and res["outcome"]["filled"] == 1
-    assert sym not in {p["symbol"] for p in broker.positions()}
-    stop = next(t for t in desk.trades() if t["kind"] == "STOP")
-    assert stop["symbol"] == sym and stop["priority"] == 0 and stop["status"] == "filled"
-    assert desk.stop_check()["n_new"] == 0
+    assert not hasattr(desk, "stop_check")
+    desk.run("quality", 1_000_000)
+    sym = next(iter(broker.pos))
+    prices[sym] *= 0.5  # crollo del titolo
+    out = desk.run("quality", 1_000_000)
+    kinds = {t["kind"] for t in desk.trades()}
+    assert "STOP" not in kinds
+    assert not any(t["symbol"] == sym and t["side"] == "sell" for t in desk.trades())
+    assert out["outcome"]["failed"] == 0
 
 
 def test_failed_orders_are_reported_and_can_be_repositioned_at_current_price(env, monkeypatch):

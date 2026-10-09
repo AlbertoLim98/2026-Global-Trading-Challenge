@@ -94,7 +94,7 @@ svg{width:100%;height:auto;display:block}
     <div class="card" id="b-ctx" hidden></div>
     <div class="card wrap"><h3 style="margin-top:0">Migliori candidati a 1 giorno</h3><table id="b-tbl" style="min-width:1000px"></table>
       <p class="note">Score di breve periodo (0-100, percentile tra i titoli dello stesso giorno), media di 7 pilastri: <b>RSI</b> a 2-3 giorni con filtro di trend (ipervenduto sopra la media a 50 giorni), <b>Rendimento/ATR</b> di ieri e della settimana (ritorno alla media), <b>Volume</b> relativo di ieri con la direzione, <b>Candela</b> (chiusura nel range e gap notturno), <b>Forza relativa</b> a 3 giorni rispetto al settore e a SPY, <b>Contesto</b> di mercato (beta alto se SPY è rialzista, basso se ribassista), <b>Volatilità</b> (espansione penalizzata).
-      Uscita: stop a <b>1,5 ATR</b> se il titolo è sopra la media a 50 giorni all'acquisto (rialzista), <b>2,5 ATR</b> se è sotto (ribassista). I segni degli indicatori sono ipotesi: usa <b>Valida gli indicatori</b> per misurarli sullo storico. I dati sono quelli dell'ultima seduta completa.</p></div>
+      <b>Nessuna regola d'uscita</b>: si esce solo con il ribilanciamento quotidiano. I segni degli indicatori sono ipotesi: usa <b>Valida gli indicatori</b> per misurarli sullo storico. I dati sono quelli dell'ultima seduta completa.</p></div>
     <div class="card wrap" id="b-ic-card" hidden></div>
   </section>
   <section id="v-r" hidden>
@@ -103,7 +103,6 @@ svg{width:100%;height:auto;display:block}
       <label>Modalità <select id="r-mode"><option value="quality">Qualità (prudente)</option><option value="beta">Alto beta</option><option value="short">Breve termine (1 gg)</option></select></label>
       <label>Capitale $ <input id="r-cap" type="number" value="1000000" step="10000" min="10000" style="width:120px"></label>
       <button class="btn primary" id="r-run">Avvia ribilanciamento giornaliero (invia gli ordini)</button>
-      <button class="btn" id="r-stops">Controlla stop ATR (vende)</button>
       <span class="badge" id="r-market"></span>
     </div>
     <div class="card" id="r-summary" hidden></div>
@@ -219,7 +218,7 @@ async function loadAcct(){
       <div class="kpi"><b class="${a.since_last?cls(a.since_last.pl):''}">${a.since_last?sgn(a.since_last.pl):'–'}</b><span>Guadagno/perdita dall'ultima riallocazione ${a.since_last?'('+pct(a.since_last.pl_pct,2)+')<br>del '+new Date(a.since_last.ts).toLocaleString('it-IT'):'<br>nessuna riallocazione ancora'}</span></div>
       <div class="kpi"><b class="${a.since_open_pl==null?'':cls(a.since_open_pl)}">${a.since_open_pl==null?'–':sgn(a.since_open_pl)}</b><span>Da apertura portafoglio ${a.since_open_pct==null?'':'('+pct(a.since_open_pct,2)+')'}<br>${open}</span></div>
       <div class="kpi"><b class="${cls(a.unrealized_pl)}">${sgn(a.unrealized_pl)}</b><span>P/L non realizzato posizioni</span></div></div>
-      <div class="card wrap"><h3 style="margin-top:0">Composizione del portafoglio <span class="badge">${a.positions.length} titoli · ${a.broker==='demo'?'DEMO':'Alpaca paper'}</span></h3>
+      <div class="card wrap"><h3 style="margin-top:0">Composizione del portafoglio <span class="badge">${a.label}${a.strategy?' · '+(STRAT[a.strategy]||a.strategy):''} · ${a.positions.length} titoli · ${a.broker==='demo'?'DEMO':'Alpaca paper'}</span></h3>
       <table style="min-width:900px"><thead><tr><th style="text-align:left">Titolo</th><th style="text-align:left">Settore</th><th>Qtà</th><th>Prezzo medio</th><th>Prezzo</th><th>Valore</th><th>Peso</th><th>P/L totale</th><th>P/L %</th></tr></thead><tbody>`
       +(a.positions.length?a.positions.map(p=>`<tr style="cursor:default"><td style="text-align:left"><b>${p.symbol}</b> <span class="badge">${p.name}</span></td><td style="text-align:left">${p.sector_name}</td><td>${p.qty}</td><td>${num(p.avg_entry)}</td><td>${num(p.price)}</td><td>${money(p.market_value)}</td><td><b>${pct(p.weight)}</b></td><td class="${cls(p.pl)}">${sgn(p.pl)}</td><td class="${cls(p.pl_pct)}">${pct(p.pl_pct)}</td></tr>`).join('')
         +`<tr style="cursor:default"><td style="text-align:left"><b>Liquidità</b></td><td></td><td></td><td></td><td></td><td>${money(ac.cash)}</td><td><b>${pct(a.cash_weight)}</b></td><td></td><td></td></tr>`
@@ -230,8 +229,8 @@ async function loadAcct(){
       +'</tbody></table><p class="note">Ogni riga misura il patrimonio del conto dall\'avvio di una riallocazione all\'avvio della successiva (per l\'ultima, fino a ora).</p></div>'
       +`<div class="card wrap"><h3 style="margin-top:0">Per settore</h3><table style="min-width:500px"><thead><tr><th style="text-align:left">Settore</th><th>Titoli</th><th>Valore</th><th>Peso</th><th>P/L totale</th></tr></thead><tbody>`
       +a.sectors.map(x=>`<tr style="cursor:default"><td style="text-align:left"><b>${x.sector_name}</b></td><td>${x.n}</td><td>${money(x.value)}</td><td><b>${pct(x.weight)}</b></td><td class="${cls(x.pl)}">${sgn(x.pl)}</td></tr>`).join('')+'</tbody></table></div>'
-      +`<div class="card wrap"><h3 style="margin-top:0">Movimenti eseguiti oggi <span class="badge">${a.movements.length}</span></h3><table style="min-width:700px"><thead><tr><th style="text-align:left">Ora</th><th style="text-align:left">Tipo</th><th style="text-align:left">Titolo</th><th>Qtà</th><th>Prezzo</th><th>Valore</th><th style="text-align:left">Motivo</th></tr></thead><tbody>`
-      +(a.movements.length?a.movements.map(m=>`<tr style="cursor:default"><td style="text-align:left">${when(m.time)}</td><td style="text-align:left"><span class="k ${m.kind}">${m.kind==='STOP'?'STOP':m.side==='sell'?'VENDITA':'ACQUISTO'}</span>${m.order_type==='limit'?' <span class="badge">limite</span>':''}</td><td style="text-align:left"><b>${m.symbol}</b> <span class="badge">${m.name}</span></td><td>${m.qty}</td><td>${num(m.price)}</td><td>${money(m.value)}</td><td style="text-align:left;white-space:normal;max-width:380px">${m.reason}</td></tr>`).join(''):'<tr><td colspan="7" style="text-align:center;color:var(--mute)">Nessun movimento eseguito oggi</td></tr>')
+      +`<div class="card wrap"><h3 style="margin-top:0">Movimenti eseguiti oggi <span class="badge">${a.movements.length}</span></h3><table style="min-width:700px"><thead><tr><th style="text-align:left">Ora</th><th style="text-align:left">Tipo</th><th style="text-align:left">Titolo</th><th style="text-align:left">Portafoglio · strategia</th><th>Qtà</th><th>Prezzo</th><th>Valore</th><th style="text-align:left">Motivo</th></tr></thead><tbody>`
+      +(a.movements.length?a.movements.map(m=>`<tr style="cursor:default"><td style="text-align:left">${when(m.time)}</td><td style="text-align:left"><span class="k ${m.kind}">${m.kind==='STOP'?'STOP':m.side==='sell'?'VENDITA':'ACQUISTO'}</span>${m.order_type==='limit'?' <span class="badge">limite</span>':''}</td><td style="text-align:left"><b>${m.symbol}</b> <span class="badge">${m.name}</span></td><td style="text-align:left">${m.portfolio||'–'}${m.strategy?' · '+(STRAT[m.strategy]||m.strategy):''}</td><td>${m.qty}</td><td>${num(m.price)}</td><td>${money(m.value)}</td><td style="text-align:left;white-space:normal;max-width:380px">${m.reason}</td></tr>`).join(''):'<tr><td colspan="8" style="text-align:center;color:var(--mute)">Nessun movimento eseguito oggi</td></tr>')
       +'</tbody></table></div>';
   }catch(e){el.innerHTML=`<div class="card">${e.message}</div>`}
 }
@@ -299,24 +298,19 @@ async function reposition(id,p){
   loadTrades();
 }
 async function runRebalance(){
-  const btn=$('#r-run');btn.disabled=true;$('#r-stops').disabled=true;btn.textContent='Calcolo e invio ordini in corso…';
+  const btn=$('#r-run');btn.disabled=true;btn.textContent='Calcolo e invio ordini in corso…';
   try{
     const r=await post('/api/rebalance/run',{mode:$('#r-mode').value,capital:+$('#r-cap').value});
     const sb=r.sector_budgets;
     $('#r-summary').hidden=false;
-    $('#r-summary').innerHTML=`<b>Esecuzione ${r.run_id}</b> · modalità ${r.params.mode} · capitale ${money(r.params.capital)} · conto ${money(r.account.equity)} (liquidità ${money(r.account.cash)}) · target investito ${money(r.invested_target)} in ${r.n_targets} titoli`
+    $('#r-summary').innerHTML=`<b>Esecuzione ${r.run_id}</b> · posizioni su <b>${r.portfolio}</b> · strategia <b>${STRAT[r.strategy]||r.strategy}</b> · capitale ${money(r.params.capital)} · conto ${money(r.account.equity)} (liquidità ${money(r.account.cash)}) · target investito ${money(r.invested_target)} in ${r.n_targets} titoli`
      +'<div class="wrap"><table style="min-width:600px;margin-top:8px"><thead><tr><th>Settore</th><th>Trend ETF</th><th>Score</th><th>Budget</th><th style="text-align:left">Note</th></tr></thead><tbody>'
      +sb.map(x=>`<tr style="cursor:default"><td><b>${x.name}</b> <span class="badge">${x.symbol}</span></td><td>${x.trend_label}</td><td>${x.score==null?'–':Math.round(x.score)}</td><td>${x.budget>0?money(x.budget):'–'}</td><td style="text-align:left">${x.eligible?'':(x.budget>0?'aggiunto per investire il 97%: '+(x.fallback||''):'escluso: '+x.reason)}</td></tr>`).join('')+'</tbody></table></div>'
      +(r.notes.length?'<p class="note">'+r.notes.join('<br>')+'</p>':'');
     {const o=r.outcome;msg(`Ribilanciamento eseguito: ${o.total} operazioni inviate · ${o.filled} eseguite · ${o.in_progress} in corso · ${o.failed} fallite.`,o.failed===0)}
   }catch(e){err(e)}
-  btn.disabled=false;$('#r-stops').disabled=false;btn.textContent='Avvia ribilanciamento giornaliero (invia gli ordini)';
+  btn.disabled=false;btn.textContent='Avvia ribilanciamento giornaliero (invia gli ordini)';
   loadTrades();
-}
-async function checkStops(){
-  $('#r-stops').disabled=true;
-  try{const r=await post('/api/rebalance/stops');{const o=r.outcome;msg(`Controllo stop: ${r.n_new} vendite per stop su ${r.n_positions} posizioni (${o.filled} eseguite, ${o.failed} fallite).`,o.failed===0)}}catch(e){err(e)}
-  $('#r-stops').disabled=false;loadTrades();
 }
 const KIND_LABEL={RUN:'Ribilanciamento',RELABEL:'Riclassificazione',PROPOSAL:'Proposta',DECISION:'Invio',DECISION_DONE:'Esito',TRADE_FAILED:'FALLITA',REPOSITION:'Riposizionata',ORDER:'Ordine',ORDER_UPDATE:'Ordine aggiornato',STOP_CHECK:'Controllo stop',SUPERSEDED:'Sostituita',ERROR:'Errore'};
 async function loadJournal(){
@@ -337,7 +331,7 @@ async function loadInfo(){
     if(i.locked){$('#r-mode').value=i.strategy;$('#r-mode').disabled=true;$('#r-mode').title='Strategia fissa di questo portafoglio'}
   }catch(e){/* info non essenziale */}
 }
-$('#r-run').onclick=runRebalance;$('#r-stops').onclick=checkStops;$('#j-refresh').onclick=loadJournal;$('#j-kind').onchange=loadJournal;
+$('#r-run').onclick=runRebalance;$('#j-refresh').onclick=loadJournal;$('#j-kind').onchange=loadJournal;
 
 const PIL=['rsi','move','volume','candle','relstrength','context','volatility'];
 const PILN={rsi:'RSI 2-3g',move:'Rend./ATR',volume:'Volume',candle:'Candela',relstrength:'Forza rel.',context:'Contesto',volatility:'Volatilità'};
@@ -350,8 +344,8 @@ async function loadShort(refresh){
     $('#b-ctx').hidden=false;
     $('#b-ctx').innerHTML=`<b>Contesto di mercato:</b> <span class="lab ${c.state}">${c.state}</span> · SPY ${pct(c.spy_vs_sma50,1)} dalla media a 50g · 1g ${pct(c.spy_ret1,2)} · 5g ${pct(c.spy_ret5,2)} · RSI(2) ${num(c.spy_rsi2,0)}
       <br><span class="badge">Ampiezza: ${pct(c.breadth_above_sma50,0)} dei titoli sopra la media a 50g · ${pct(c.breadth_up_yesterday,0)} in rialzo ieri · Volatilità: ${c.vol_regime} (5g/20g ${num(c.vol_ratio_5_20)})</span>`;
-    $('#b-tbl').innerHTML='<thead><tr><th>Pos.</th><th style="text-align:left">Titolo</th><th>Prezzo</th><th>ATR</th><th>Trend</th><th>Stop</th>'+PIL.map(p=>`<th>${PILN[p]}</th>`).join('')+'<th>Totale</th></tr></thead><tbody>'
-      +d.rows.slice(0,40).map(r=>`<tr style="cursor:default"><td>${r.rank}</td><td style="text-align:left"><b>${r.symbol}</b> <span class="badge">${r.name} · ${r.sector||''}</span></td><td>${num(r.price)}</td><td>${num(r.atr)}</td><td><span class="lab ${r.trend_label}">${r.trend_label}</span></td><td>${num(r.stop_mult,1)} ATR</td>`
+    $('#b-tbl').innerHTML='<thead><tr><th>Pos.</th><th style="text-align:left">Titolo</th><th>Prezzo</th><th>ATR</th><th>Trend</th>'+PIL.map(p=>`<th>${PILN[p]}</th>`).join('')+'<th>Totale</th></tr></thead><tbody>'
+      +d.rows.slice(0,40).map(r=>`<tr style="cursor:default"><td>${r.rank}</td><td style="text-align:left"><b>${r.symbol}</b> <span class="badge">${r.name} · ${r.sector||''}</span></td><td>${num(r.price)}</td><td>${num(r.atr)}</td><td><span class="lab ${r.trend_label}">${r.trend_label}</span></td>`
         +PIL.map(p=>`<td>${pill(r.pillars[p])}</td>`).join('')+`<td>${pill(r.total)}</td></tr>`).join('')+'</tbody>';
   }catch(e){$('#b-meta').textContent='';err(e)}
 }

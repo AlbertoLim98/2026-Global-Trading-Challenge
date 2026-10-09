@@ -265,8 +265,6 @@ def make_handler(state: State, desk: desk_mod.Desk, port: int) -> type[BaseHTTPR
                     mode = body.get("mode", "quality")
                     capital = float(body.get("capital", 1_000_000))
                     self._json(desk.run(mode, capital))
-                elif url.path == "/api/rebalance/stops":
-                    self._json(desk.stop_check())
                 elif url.path == "/api/trade/reposition":
                     self._json(desk.reposition(str(body.get("id", ""))))
                 else:
