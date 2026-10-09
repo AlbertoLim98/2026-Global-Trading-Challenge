@@ -182,7 +182,16 @@ Legge per ciascuno conto, posizioni e storico del patrimonio (Alpaca) e, con `--
 riepilogo del journal (strategia, ribilanciamenti, operazioni fallite). Stampa e scrive un Excel
 (`confronto_portafogli_AAAA-MM-GG.xlsx`, o `--out`) con rendimento, volatilità e perdita massima sulla
 finestra in comune, confronto con SPY, titoli in comune e sovrapposizione dei pesi, composizione per settore
-e andamento in base 100. `--demo` prova lo script con due conti simulati. Con pochi giorni di storico le
+e andamento in base 100. `--demo` prova lo script con due conti simulati.
+
+**Portafogli partiti in momenti diversi:** passa i due journal e un confronto intraday, così la finestra parte dal
+primo ordine eseguito del portafoglio più recente (`--from` per scegliere un altro inizio, in UTC):
+
+```bash
+uv run python sector_lab/compare_portfolios.py --env-a .env.p17 --env-b .env.p18 --name-a "Portafoglio beta" --name-b "Portafoglio 1g" --journal-a sector_lab/journal_beta.db --journal-b sector_lab/journal_1g.db --period 1W --timeframe 15Min
+```
+
+La volatilità è annualizzata in base alla granularità scelta (1D, 1H, 15Min, 5Min, 1Min). Con pochi giorni di storico le
 differenze possono essere solo rumore.
 
 **Titoli non negoziabili:** a ogni ribilanciamento il programma chiede ad Alpaca l'elenco delle azioni

@@ -91,6 +91,42 @@ def fetch_bars(
     return out
 
 
+def fetch_intraday(
+    symbol: str,
+    start: datetime,
+    minutes: int,
+    feed: str = "iex",
+    creds: tuple[str, str] | None = None,
+) -> pd.Series:
+    """Chiusure intraday (UTC, senza fuso) di un simbolo a barre di `minutes` minuti, da `start` a ora."""
+    from alpaca.data.enums import DataFeed
+    from alpaca.data.historical import StockHistoricalDataClient
+    from alpaca.data.requests import StockBarsRequest
+    from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+
+    creds = creds or keys()
+    if creds is None:
+        raise RuntimeError("ALPACA_API_KEY / ALPACA_SECRET_KEY mancanti")
+    client = StockHistoricalDataClient(*creds)
+    unit, n = (
+        (TimeFrameUnit.Hour, minutes // 60)
+        if minutes % 60 == 0
+        else (TimeFrameUnit.Minute, minutes)
+    )
+    req = StockBarsRequest(
+        symbol_or_symbols=symbol,
+        timeframe=TimeFrame(n, unit),
+        start=start,
+        feed=DataFeed(feed.lower()),
+    )
+    raw = with_retry(lambda: client.get_stock_bars(req).df)
+    if raw.empty:
+        return pd.Series(dtype=float)
+    s = raw.loc[symbol]["close"].astype(float)
+    s.index = pd.DatetimeIndex(s.index).tz_convert("UTC").tz_localize(None)
+    return s
+
+
 def demo_bars(symbols: list[str]) -> dict[str, pd.DataFrame]:
     """Serie sintetiche (random walk con seed fisso) per provare l'interfaccia offline."""
     idx = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=420)

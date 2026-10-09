@@ -31,6 +31,9 @@ from export import Col, Workbook, _notes_sheet, _save, _sheet
 from journal import STRATEGY_LABEL
 
 PCT, PCT2, NUM, MONEY = "0.0%", "0.00%", "0.00", "#,##0"
+# barre per seduta di ogni timeframe (per annualizzare la volatilità)
+BARS_PER_DAY = {"1D": 1, "1H": 7, "15Min": 26, "5Min": 78, "1Min": 390}
+MINUTES = {"1H": 60, "15Min": 15, "5Min": 5, "1Min": 1}
 
 
 # --- lettura dei dati ------------------------------------------------------------------------------
@@ -53,14 +56,16 @@ def credentials(path: str | Path) -> tuple[str, str]:
     return key, secret
 
 
-def snapshot(broker, name: str, period: str, creds: tuple[str, str] | None = None) -> dict:
+def snapshot(
+    broker, name: str, period: str, creds: tuple[str, str] | None = None, timeframe: str = "1D"
+) -> dict:
     """Foto di un portafoglio: conto, posizioni (con peso) e storico del patrimonio."""
     acct = broker.account()
     equity = acct["equity"]
     pos = broker.positions()
     for p in pos:
         p["weight"] = p["market_value"] / equity if equity else 0.0
-    hist = pd.Series(dict(broker.portfolio_history(period)), dtype=float)
+    hist = pd.Series(dict(broker.portfolio_history(period, timeframe)), dtype=float)
     hist.index = pd.to_datetime(hist.index)
     return {
         "name": name,
@@ -87,13 +92,21 @@ def journal_summary(path: str | Path | None) -> dict:
             for r in db.execute("SELECT status, COUNT(*) AS n FROM proposals GROUP BY status")
         }
         failed = db.execute("SELECT COUNT(*) FROM events WHERE kind = 'TRADE_FAILED'").fetchone()[0]
+        first_fill = db.execute(
+            "SELECT MIN(updated) FROM proposals WHERE status = 'filled'"
+        ).fetchone()[0]
     except sqlite3.DatabaseError:
         return {}
     finally:
         db.close()
     import json
 
-    out: dict = {"n_runs": len(runs), "operations": status, "trade_failed": failed}
+    out: dict = {
+        "n_runs": len(runs),
+        "operations": status,
+        "trade_failed": failed,
+        "first_fill": first_fill,  # primo ordine eseguito: da qui il portafoglio è davvero investito
+    }
     if runs:
         last = runs[-1]
         p = json.loads(last["payload"])
@@ -108,12 +121,13 @@ def journal_summary(path: str | Path | None) -> dict:
 
 
 # --- metriche ---------------------------------------------------------------------------------------
-def series_metrics(s: pd.Series) -> dict:
+def series_metrics(s: pd.Series, periods_per_year: float = 252) -> dict:
     """Rendimento, volatilità e perdita massima di una serie di patrimonio giornaliero."""
     s = s.dropna()
     if len(s) < 2:
         return {
             "n_days": len(s),
+            "n_points": len(s),
             "total_return": None,
             "vol": None,
             "max_drawdown": None,
@@ -123,27 +137,44 @@ def series_metrics(s: pd.Series) -> dict:
     r = s.pct_change().dropna()
     return {
         "n_days": len(s),
+        "n_points": len(s),
         "total_return": float(s.iloc[-1] / s.iloc[0] - 1),
-        "vol": float(r.std() * math.sqrt(252)) if len(r) > 1 else None,
+        "vol": float(r.std() * math.sqrt(periods_per_year)) if len(r) > 1 else None,
         "max_drawdown": float((s / s.cummax() - 1).min()),
         "best_day": float(r.max()),
         "worst_day": float(r.min()),
     }
 
 
-def spy_series(creds: tuple[str, str] | None, start: pd.Timestamp, feed: str) -> pd.Series | None:
-    """Chiusure giornaliere di SPY (None se non raggiungibile o in demo)."""
+def spy_series(
+    creds: tuple[str, str] | None, start: pd.Timestamp, feed: str, timeframe: str = "1D"
+) -> pd.Series | None:
+    """Chiusure di SPY dal giorno `start` (giornaliere o intraday); None se non raggiungibile o in demo."""
     if creds is None:
         return None
     try:
-        bars = data.fetch_bars([data.BENCHMARK], feed, creds)
+        if timeframe == "1D":
+            bars = data.fetch_bars([data.BENCHMARK], feed, creds)
+            s = bars.get(data.BENCHMARK)
+            return None if s is None else s["close"].loc[start:]
+        begin = (start - pd.Timedelta(days=1)).to_pydatetime().replace(tzinfo=UTC)
+        return data.fetch_intraday(data.BENCHMARK, begin, MINUTES[timeframe], feed, creds)
     except Exception:  # noqa: BLE001 - il confronto con SPY è facoltativo
         return None
-    s = bars.get(data.BENCHMARK)
-    return None if s is None else s["close"].loc[start:]
 
 
-def compare(a: dict, b: dict, spy: pd.Series | None = None) -> dict:
+def _fmt_ts(ts: pd.Timestamp) -> str:
+    return str(ts.date()) if (ts.hour, ts.minute) == (0, 0) else f"{ts:%Y-%m-%d %H:%M}"
+
+
+def compare(
+    a: dict,
+    b: dict,
+    spy: pd.Series | None = None,
+    start: pd.Timestamp | None = None,
+    ppy: float = 252,
+    own_starts: tuple[pd.Timestamp | None, pd.Timestamp | None] = (None, None),
+) -> dict:
     """Confronto completo di due fotografie."""
     uni = data.load_universe()
     names, sectors = (
@@ -154,21 +185,23 @@ def compare(a: dict, b: dict, spy: pd.Series | None = None) -> dict:
     # finestra comune: dal primo giorno in cui entrambi hanno un patrimonio
     ha, hb = a["history"], b["history"]
     common = ha.index.intersection(hb.index)
+    if start is not None:  # dal momento in cui anche il portafoglio più recente è investito
+        common = common[common >= start]
     win = {}
     if len(common) >= 2:
         sa, sb = ha.loc[common], hb.loc[common]
         win = {
-            "from": str(common[0].date()),
-            "to": str(common[-1].date()),
-            "a": series_metrics(sa),
-            "b": series_metrics(sb),
+            "from": _fmt_ts(common[0]),
+            "to": _fmt_ts(common[-1]),
+            "a": series_metrics(sa, ppy),
+            "b": series_metrics(sb, ppy),
         }
         if spy is not None and len(spy):
             sp = spy.copy()
             sp.index = pd.to_datetime(sp.index)
             sp = sp.reindex(common).ffill().dropna()
             if len(sp) >= 2:
-                win["spy"] = series_metrics(sp)
+                win["spy"] = series_metrics(sp, ppy)
         win["curve"] = pd.DataFrame(
             {a["name"]: sa / sa.iloc[0] * 100, b["name"]: sb / sb.iloc[0] * 100}
             | (
@@ -177,7 +210,10 @@ def compare(a: dict, b: dict, spy: pd.Series | None = None) -> dict:
                 else {}
             )
         )
-    own = {"a": series_metrics(ha), "b": series_metrics(hb)}
+    own = {
+        k: series_metrics(h.loc[st:] if st is not None else h, ppy)
+        for k, h, st in (("a", ha, own_starts[0]), ("b", hb, own_starts[1]))
+    }
 
     # posizioni
     wa = {p["symbol"]: p for p in a["positions"]}
@@ -283,15 +319,15 @@ def report(res: dict, ja: dict | None = None, jb: dict | None = None) -> str:
     if w:
         L += [
             "",
-            f"Finestra comune: dal {w['from']} al {w['to']} ({w['a']['n_days']} giorni)",
+            f"Finestra comune: dal {w['from']} al {w['to']} ({w['a']['n_points']} rilevazioni)",
             "-" * 78,
         ]
         for label, key, kind in (
             ("Rendimento", "total_return", "pct"),
             ("Volatilità annualizzata", "vol", "p"),
             ("Perdita massima", "max_drawdown", "pct"),
-            ("Giorno migliore", "best_day", "pct"),
-            ("Giorno peggiore", "worst_day", "pct"),
+            ("Rilevazione migliore", "best_day", "pct"),
+            ("Rilevazione peggiore", "worst_day", "pct"),
         ):
             row(label, _f(w["a"][key], kind), _f(w["b"][key], kind))
         if "spy" in w:
@@ -306,8 +342,22 @@ def report(res: dict, ja: dict | None = None, jb: dict | None = None) -> str:
     else:
         L += [
             "",
-            "Storico del patrimonio insufficiente per una finestra comune (servono almeno 2 giorni in comune).",
+            "Storico del patrimonio insufficiente per una finestra comune (servono almeno 2 rilevazioni in comune).",
         ]
+    own = res["own"]
+    if own["a"]["total_return"] is not None and own["b"]["total_return"] is not None:
+        L += ["", "Dall'inizio di ciascun portafoglio (primo ordine eseguito, se noto)", "-" * 78]
+        row(
+            "Rendimento dal proprio inizio",
+            _f(own["a"]["total_return"]),
+            _f(own["b"]["total_return"]),
+        )
+        row(
+            "Perdita massima dal proprio inizio",
+            _f(own["a"]["max_drawdown"]),
+            _f(own["b"]["max_drawdown"]),
+        )
+        row("Rilevazioni", str(own["a"]["n_points"]), str(own["b"]["n_points"]))
     o = res["overlap"]
     L += [
         "",
@@ -478,6 +528,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--period", default="1M", help="storico del patrimonio: 1W, 1M, 3M, 1A, all (default 1M)"
     )
+    ap.add_argument(
+        "--timeframe",
+        default="1D",
+        choices=sorted(BARS_PER_DAY),
+        help="granularità dello storico: 1D (giornaliero, default) oppure intraday 1H, 15Min, 5Min, 1Min.\n"
+        "Con portafogli partiti in momenti diversi conviene un intraday (es. --period 1W --timeframe 15Min)",
+    )
+    ap.add_argument(
+        "--from",
+        dest="from_",
+        help="inizio della finestra di confronto (AAAA-MM-GG o AAAA-MM-GGTHH:MM, UTC). Default: il primo ordine\n"
+        "eseguito del portafoglio più recente (se si indicano i journal), altrimenti il primo giorno in comune",
+    )
     ap.add_argument("--feed", default="iex")
     ap.add_argument(
         "--out", help="file Excel di output (default confronto_portafogli_AAAA-MM-GG.xlsx)"
@@ -500,15 +563,36 @@ def main(argv: list[str] | None = None) -> int:
                 "ATTENZIONE: i due file contengono le stesse chiavi (stesso conto).",
                 file=sys.stderr,
             )
-    sa = snapshot(brokers[0], a.name_a, a.period, creds_a)
-    sb = snapshot(brokers[1], a.name_b, a.period, creds_b)
-    start = (
-        max(sa["history"].index.min(), sb["history"].index.min())
-        if len(sa["history"]) and len(sb["history"])
-        else pd.Timestamp(datetime.now(UTC).date())
-    )
-    res = compare(sa, sb, spy_series(creds_a, start, a.feed))
+    sa = snapshot(brokers[0], a.name_a, a.period, creds_a, a.timeframe)
+    sb = snapshot(brokers[1], a.name_b, a.period, creds_b, a.timeframe)
     ja, jb = journal_summary(a.journal_a), journal_summary(a.journal_b)
+    fills = [
+        pd.Timestamp(j["first_fill"]).tz_localize(None) if j.get("first_fill") else None
+        for j in (ja, jb)
+    ]
+    start = (
+        pd.Timestamp(a.from_)
+        if a.from_
+        else (max(fills) if all(f is not None for f in fills) else None)
+    )
+    if start is not None and start.tzinfo is not None:
+        start = start.tz_convert("UTC").tz_localize(None)
+    if start is not None:
+        print(f"Finestra di confronto dal {_fmt_ts(start)} UTC "
+              f"({'indicata da te' if a.from_ else 'primo ordine eseguito del portafoglio più recente'})\n")  # fmt: skip
+    spy_from = (
+        start
+        if start is not None
+        else (
+            max(sa["history"].index.min(), sb["history"].index.min())
+            if len(sa["history"]) and len(sb["history"])
+            else pd.Timestamp(datetime.now(UTC).date())
+        )
+    )
+    ppy = 252 * BARS_PER_DAY[a.timeframe]
+    res = compare(
+        sa, sb, spy_series(creds_a, spy_from, a.feed, a.timeframe), start, ppy, tuple(fills)
+    )
     print(report(res, ja, jb))
     out = a.out or f"confronto_portafogli_{datetime.now(UTC):%Y-%m-%d}.xlsx"
     to_excel(res, ja, jb, out)

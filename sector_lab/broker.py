@@ -30,7 +30,9 @@ class Broker(Protocol):
     ) -> dict: ...
     def get_order(self, order_id: str) -> dict: ...
     def cancel_order(self, order_id: str) -> str: ...
-    def portfolio_history(self, period: str = "1M") -> list[tuple[str, float]]: ...
+    def portfolio_history(
+        self, period: str = "1M", timeframe: str = "1D"
+    ) -> list[tuple[str, float]]: ...
 
 
 def _num(v: Any) -> float | None:
@@ -168,14 +170,18 @@ class AlpacaBroker:
     def get_order(self, order_id: str) -> dict:
         return _order(with_retry(lambda: self._t.get_order_by_id(order_id)))
 
-    def portfolio_history(self, period: str = "1M") -> list[tuple[str, float]]:
-        """Patrimonio di fine giornata del conto: lista di (data AAAA-MM-GG, patrimonio), senza i giorni a zero."""
+    def portfolio_history(
+        self, period: str = "1M", timeframe: str = "1D"
+    ) -> list[tuple[str, float]]:
+        """Patrimonio del conto: (data AAAA-MM-GG, patrimonio) per timeframe 1D, (AAAA-MM-GGTHH:MM UTC, patrimonio)
+        per quelli intraday (1Min, 5Min, 15Min, 1H). I punti a patrimonio zero sono esclusi."""
         from alpaca.trading.requests import GetPortfolioHistoryRequest
 
-        req = GetPortfolioHistoryRequest(period=period, timeframe="1D")
+        req = GetPortfolioHistoryRequest(period=period, timeframe=timeframe)
         h = with_retry(lambda: self._t.get_portfolio_history(req))
+        fmt = "%Y-%m-%d" if timeframe == "1D" else "%Y-%m-%dT%H:%M"
         return [
-            (datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d"), float(eq))
+            (datetime.fromtimestamp(ts, tz=UTC).strftime(fmt), float(eq))
             for ts, eq in zip(h.timestamp or [], h.equity or [], strict=False)
             if eq
         ]
@@ -305,7 +311,9 @@ class DemoBroker:
                 return o
         raise OrderNotFound(f"order not found: {order_id}")
 
-    def portfolio_history(self, period: str = "1M") -> list[tuple[str, float]]:
+    def portfolio_history(
+        self, period: str = "1M", timeframe: str = "1D"
+    ) -> list[tuple[str, float]]:
         return list(getattr(self, "history", []))  # serie di prova (data, patrimonio)
 
     def cancel_order(self, order_id: str) -> str:
