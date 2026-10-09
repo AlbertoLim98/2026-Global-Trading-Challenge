@@ -48,7 +48,7 @@ svg{width:100%;height:auto;display:block}
 </head>
 <body>
 <header>
-  <h1>Sector Lab</h1>
+  <h1>Sector Lab <span class="k" id="pf" hidden style="background:var(--acc);margin-left:8px"></span></h1>
   <div class="tabs"><button id="t-s" class="on">Settori</button><button id="t-a">Aziende</button><button id="t-r">Ribilancio</button><button id="t-j">Journal</button><button id="t-p">Portafoglio paper</button></div>
   <a class="btn" id="xlsx" href="/api/export.xlsx" download style="text-decoration:none">Scarica Excel</a>
   <button class="btn" id="refresh">Aggiorna dati</button>
@@ -98,7 +98,7 @@ svg{width:100%;height:auto;display:block}
   </section>
   <section id="v-j" hidden>
     <div class="card" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
-      <label>Evento <select id="j-kind"><option value="">Tutti</option><option>RUN</option><option>PROPOSAL</option><option>DECISION</option><option>TRADE_FAILED</option><option>REPOSITION</option><option>ORDER</option><option>ORDER_UPDATE</option><option>STOP_CHECK</option><option>ERROR</option></select></label>
+      <label>Evento <select id="j-kind"><option value="">Tutti</option><option>RUN</option><option>PROPOSAL</option><option>DECISION</option><option>TRADE_FAILED</option><option>RELABEL</option><option>REPOSITION</option><option>ORDER</option><option>ORDER_UPDATE</option><option>STOP_CHECK</option><option>ERROR</option></select></label>
       <button class="btn" id="j-refresh">Aggiorna</button>
       <a class="btn" href="/api/journal.xlsx" download style="text-decoration:none">Scarica Journal (Excel)</a>
     </div>
@@ -211,8 +211,8 @@ async function loadAcct(){
         +`<tr style="cursor:default"><td style="text-align:left"><b>Liquidità</b></td><td></td><td></td><td></td><td></td><td>${money(ac.cash)}</td><td><b>${pct(a.cash_weight)}</b></td><td></td><td></td></tr>`
         :'<tr><td colspan="9" style="text-align:center;color:var(--mute)">Nessuna posizione aperta</td></tr>')
       +'</tbody></table></div>'
-      +`<div class="card wrap"><h3 style="margin-top:0">Guadagno per riallocazione <span class="badge">${a.rebalances.length}</span></h3><table style="min-width:700px"><thead><tr><th style="text-align:left">Riallocazione</th><th style="text-align:left">Modalità</th><th>Ordini</th><th>Patrimonio al via</th><th>Patrimonio a fine</th><th>Guadagno/perdita</th><th>%</th></tr></thead><tbody>`
-      +(a.rebalances.length?a.rebalances.map(r=>`<tr style="cursor:default"><td style="text-align:left">${new Date(r.ts).toLocaleString('it-IT')}${r.ongoing?' <span class="badge">in corso</span>':''}</td><td style="text-align:left">${r.mode==='beta'?'Alto beta':'Qualità'}</td><td>${r.n_orders}</td><td>${money(r.equity)}</td><td>${money(r.end_equity)}${r.ongoing?' <span class="badge">oggi</span>':''}</td><td class="${cls(r.pl)}"><b>${sgn(r.pl)}</b></td><td class="${cls(r.pl_pct)}">${pct(r.pl_pct,2)}</td></tr>`).join(''):'<tr><td colspan="7" style="text-align:center;color:var(--mute)">Nessuna riallocazione registrata</td></tr>')
+      +`<div class="card wrap"><h3 style="margin-top:0">Guadagno per riallocazione <span class="badge">${a.rebalances.length}</span></h3><table style="min-width:700px"><thead><tr><th style="text-align:left">Riallocazione</th><th style="text-align:left">Portafoglio · strategia</th><th>Ordini</th><th>Patrimonio al via</th><th>Patrimonio a fine</th><th>Guadagno/perdita</th><th>%</th></tr></thead><tbody>`
+      +(a.rebalances.length?a.rebalances.map(r=>`<tr style="cursor:default"><td style="text-align:left">${new Date(r.ts).toLocaleString('it-IT')}${r.ongoing?' <span class="badge">in corso</span>':''}</td><td style="text-align:left">${r.portfolio?r.portfolio+' · ':''}${STRAT[r.strategy]||r.strategy||'–'}</td><td>${r.n_orders}</td><td>${money(r.equity)}</td><td>${money(r.end_equity)}${r.ongoing?' <span class="badge">oggi</span>':''}</td><td class="${cls(r.pl)}"><b>${sgn(r.pl)}</b></td><td class="${cls(r.pl_pct)}">${pct(r.pl_pct,2)}</td></tr>`).join(''):'<tr><td colspan="7" style="text-align:center;color:var(--mute)">Nessuna riallocazione registrata</td></tr>')
       +'</tbody></table><p class="note">Ogni riga misura il patrimonio del conto dall\'avvio di una riallocazione all\'avvio della successiva (per l\'ultima, fino a ora).</p></div>'
       +`<div class="card wrap"><h3 style="margin-top:0">Per settore</h3><table style="min-width:500px"><thead><tr><th style="text-align:left">Settore</th><th>Titoli</th><th>Valore</th><th>Peso</th><th>P/L totale</th></tr></thead><tbody>`
       +a.sectors.map(x=>`<tr style="cursor:default"><td style="text-align:left"><b>${x.sector_name}</b></td><td>${x.n}</td><td>${money(x.value)}</td><td><b>${pct(x.weight)}</b></td><td class="${cls(x.pl)}">${sgn(x.pl)}</td></tr>`).join('')+'</tbody></table></div>'
@@ -250,6 +250,7 @@ const SCOLS=[
  ['Totale',r=>pill(r.scores.total)]];
 const SGROUPS=[['',3],['Trend (vs ACWI)',3],['Momentum (TWRR vs ACWI)',6],['Volume',3],['Volatilità',3],['Beta',2],['Pesi',3],['',1]];
 
+let BASE_TITLE='Sector Lab';
 const POSTH={'Content-Type':'application/json','X-Sector-Lab':'1'};
 async function post(u,b){const r=await fetch(u,{method:'POST',headers:POSTH,body:JSON.stringify(b||{})});const j=await r.json();if(!r.ok)throw new Error(j.error||r.statusText);return j}
 const hhmm=iso=>new Date(iso).toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'});
@@ -258,7 +259,7 @@ let rTimer=null;
 const ESITO={filled:['Eseguita','ok'],submitted:['In corso / in coda','wait'],failed:['NON ANDATA A BUON FINE','bad'],repositioned:['Riposizionata','mute'],void:['Annullata (posizione assente)','mute'],superseded:['Archiviata','mute']};
 function renderTrades(d){
   $('#r-market').textContent=(d.broker==='demo'?'DEMO · ':'Alpaca paper · ')+(d.market.is_open?'mercato aperto':'mercato chiuso (gli ordini restano in coda fino all\'apertura)');
-  document.title=(d.n_failed?`(${d.n_failed} fallite) `:'')+'Sector Lab';
+  document.title=(d.n_failed?`(${d.n_failed} fallite) `:'')+BASE_TITLE;
   $('#r-alert').hidden=!d.n_failed;
   $('#r-alert').innerHTML=d.n_failed?`<b>${d.n_failed} operazion${d.n_failed===1?'e non è andata':'i non sono andate'} a buon fine.</b> Controlla il motivo nella tabella e usa <b>Riposiziona a prezzo attuale</b> per rimandare la quantità non eseguita.`:'';
   const rows=[...d.trades].sort((a,b)=>(b.status==='failed')-(a.status==='failed'));
@@ -303,13 +304,24 @@ async function checkStops(){
   try{const r=await post('/api/rebalance/stops');{const o=r.outcome;msg(`Controllo stop: ${r.n_new} vendite per stop su ${r.n_positions} posizioni (${o.filled} eseguite, ${o.failed} fallite).`,o.failed===0)}}catch(e){err(e)}
   $('#r-stops').disabled=false;loadTrades();
 }
-const KIND_LABEL={RUN:'Ribilanciamento',PROPOSAL:'Proposta',DECISION:'Invio',DECISION_DONE:'Esito',TRADE_FAILED:'FALLITA',REPOSITION:'Riposizionata',ORDER:'Ordine',ORDER_UPDATE:'Ordine aggiornato',STOP_CHECK:'Controllo stop',SUPERSEDED:'Sostituita',ERROR:'Errore'};
+const KIND_LABEL={RUN:'Ribilanciamento',RELABEL:'Riclassificazione',PROPOSAL:'Proposta',DECISION:'Invio',DECISION_DONE:'Esito',TRADE_FAILED:'FALLITA',REPOSITION:'Riposizionata',ORDER:'Ordine',ORDER_UPDATE:'Ordine aggiornato',STOP_CHECK:'Controllo stop',SUPERSEDED:'Sostituita',ERROR:'Errore'};
 async function loadJournal(){
   try{
     const d=await api('/api/journal?limit=300'+($('#j-kind').value?'&kind='+$('#j-kind').value:''));
-    $('#j-tbl').innerHTML='<thead><tr><th>N.</th><th>Data/ora</th><th>Evento</th><th style="text-align:left">Riepilogo</th></tr></thead><tbody>'
-     +d.events.map(e=>`<tr style="cursor:default"><td>${e.id}</td><td>${new Date(e.ts).toLocaleString('it-IT')}</td><td>${KIND_LABEL[e.kind]||e.kind}</td><td style="text-align:left;white-space:normal">${e.summary}</td></tr>`).join('')+'</tbody>';
+    $('#j-tbl').innerHTML='<thead><tr><th>N.</th><th>Data/ora</th><th>Portafoglio</th><th>Strategia</th><th>Evento</th><th style="text-align:left">Riepilogo</th></tr></thead><tbody>'
+     +d.events.map(e=>`<tr style="cursor:default"><td>${e.id}</td><td>${new Date(e.ts).toLocaleString('it-IT')}</td><td>${e.portfolio||'–'}</td><td>${e.strategy?STRAT[e.strategy]||e.strategy:'–'}${e.relabeled?' <span class="badge">corretta</span>':''}</td><td>${KIND_LABEL[e.kind]||e.kind}</td><td style="text-align:left;white-space:normal">${e.summary}</td></tr>`).join('')+'</tbody>';
   }catch(e){err(e)}
+}
+const STRAT={beta:'Alto beta',quality:'Qualità'};
+async function loadInfo(){
+  try{
+    const i=await api('/api/info');
+    if(i.portfolio||i.strategy){
+      $('#pf').hidden=false;$('#pf').textContent=[i.portfolio,i.strategy?STRAT[i.strategy]:null].filter(Boolean).join(' · ');
+      BASE_TITLE=(i.portfolio||'Sector Lab')+(i.strategy?' · '+STRAT[i.strategy]:'');document.title=BASE_TITLE;
+    }
+    if(i.locked){$('#r-mode').value=i.strategy;$('#r-mode').disabled=true;$('#r-mode').title='Strategia fissa di questo portafoglio'}
+  }catch(e){/* info non essenziale */}
 }
 $('#r-run').onclick=runRebalance;$('#r-stops').onclick=checkStops;$('#j-refresh').onclick=loadJournal;$('#j-kind').onchange=loadJournal;
 let aInit=false;
@@ -346,7 +358,7 @@ function showTab(t){
 }
 $('#t-s').onclick=()=>showTab('s');$('#t-a').onclick=()=>showTab('a');$('#t-r').onclick=()=>showTab('r');$('#t-j').onclick=()=>showTab('j');$('#t-p').onclick=()=>showTab('p');
 $('#refresh').onclick=()=>load(true);
-load(false);
+load(false);loadInfo();
 </script>
 </body>
 </html>

@@ -265,6 +265,8 @@ def make_handler(state: State, desk: desk_mod.Desk, port: int) -> type[BaseHTTPR
                     acc = desk.broker.account()
                     pos = desk.broker.positions()
                     self._json({**acc, "positions": pos, "broker": desk.broker.name})
+                elif url.path == "/api/info":
+                    self._json(desk.info())
                 elif url.path == "/api/portfolio":
                     desk.refresh_orders()
                     self._json(desk.portfolio())
@@ -313,9 +315,20 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=8770)
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--feed", default=None, help="iex (gratuito, default) o sip")
+    ap.add_argument("--portfolio", default=None, help="nome del portafoglio (compare nel journal)")
+    ap.add_argument(
+        "--strategy",
+        choices=sorted(journal_mod.STRATEGY_LABEL),
+        default=None,
+        help="strategia fissa del portafoglio: beta (alto beta) o quality (qualità)",
+    )
+    ap.add_argument("--env", default=None, help="file con le chiavi Alpaca (default: .env)")
+    ap.add_argument(
+        "--journal", default=None, help="percorso del journal (default dedotto dal nome)"
+    )
     a = ap.parse_args()
 
-    data.load_env(HERE.parent / ".env")
+    data.load_env(Path(a.env) if a.env else HERE.parent / ".env")
     if not a.demo and data.keys() is None:
         sys.exit(
             "Chiavi Alpaca mancanti: compila ALPACA_API_KEY e ALPACA_SECRET_KEY in .env, "
@@ -327,16 +340,27 @@ def main() -> None:
         syms = [*data.load_universe().ticker, data.STOCK_BENCHMARK, *data.SECTORS, data.BENCHMARK]
         prices = {k: float(v["close"].iloc[-1]) for k, v in data.demo_bars(syms).items()}
         broker = broker_mod.DemoBroker(1_000_000.0, prices)
-        jpath = HERE / "journal_demo.db"
+        jpath = Path(a.journal) if a.journal else HERE / "journal_demo.db"
     else:
         creds = data.keys()
         broker = broker_mod.AlpacaBroker(*creds, feed=feed)
-        jpath = Path(os.environ.get("SECTOR_LAB_JOURNAL", HERE / "journal.db"))
+        slug = "".join(c if c.isalnum() else "_" for c in (a.portfolio or "").lower()).strip("_")
+        default = HERE / (f"journal_{slug}.db" if slug else "journal.db")
+        jpath = Path(a.journal or os.environ.get("SECTOR_LAB_JOURNAL") or default)
     state.tradable_fn = broker.tradable_symbols
-    desk = desk_mod.Desk(state, broker, journal_mod.Journal(jpath))
+    desk = desk_mod.Desk(
+        state,
+        broker,
+        journal_mod.Journal(jpath, a.portfolio, a.strategy),
+        portfolio=a.portfolio,
+        strategy=a.strategy,
+    )
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(state, desk, a.port))
     url = f"http://127.0.0.1:{a.port}"
-    print(f"Sector Lab su {url}  ({'DEMO' if a.demo else 'Alpaca paper, feed ' + feed})")
+    label = f" · {a.portfolio}" if a.portfolio else ""
+    label += f" · strategia {journal_mod.STRATEGY_LABEL[a.strategy]}" if a.strategy else ""
+    print(f"Sector Lab su {url}  ({'DEMO' if a.demo else 'Alpaca paper, feed ' + feed}){label}")
+    print(f"Journal: {jpath}")
     if not a.no_browser:
         threading.Timer(0.5, webbrowser.open, args=(url,)).start()
     with contextlib.suppress(KeyboardInterrupt):

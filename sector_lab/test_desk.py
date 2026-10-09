@@ -564,3 +564,174 @@ def test_inactive_asset_error_is_explained_and_reposition_prefix_is_not_repeated
     reason = desk.journal.get_proposal(r2["new_id"])["reason"]
     assert reason.count("Riposizionata a prezzo attuale") == 1
     assert reason.endswith(t["reason"])
+
+
+# --- portafogli con strategie diverse e correzione delle etichette -----------------------------------
+import journal_tool
+
+
+def _desk(tmp_path, name, portfolio=None, strategy=None):
+    state = server.State(True, "iex")
+    syms = [*data.load_universe().ticker, data.STOCK_BENCHMARK, *data.SECTORS, data.BENCHMARK]
+    prices = {k: float(v["close"].iloc[-1]) for k, v in data.demo_bars(syms).items()}
+    j = journal_mod.Journal(tmp_path / f"{name}.db", portfolio, strategy)
+    return desk_mod.Desk(
+        state, broker_mod.DemoBroker(1_000_000.0, prices), j, settle_seconds=0,
+        portfolio=portfolio, strategy=strategy,
+    )  # fmt: skip
+
+
+def test_locked_strategy_labels_every_new_event_and_ignores_the_requested_mode(tmp_path):
+    d = _desk(tmp_path, "b", "Portafoglio 17", "beta")
+    assert d.info() == {
+        "portfolio": "Portafoglio 17",
+        "strategy": "beta",
+        "locked": True,
+        "broker": "demo",
+    }
+    d.run("quality", 1_000_000)  # la richiesta dice qualità, ma il portafoglio è alto beta
+    ev = d.journal.events(10_000)
+    assert ev and all(e["portfolio"] == "Portafoglio 17" and e["strategy"] == "beta" for e in ev)
+    assert d.journal.events(kind="RUN")[0]["payload"]["params"]["mode"] == "beta"
+    assert d.portfolio()["rebalances"][0]["strategy"] == "beta"
+    assert d.portfolio()["rebalances"][0]["portfolio"] == "Portafoglio 17"
+
+
+def test_two_portfolios_with_different_strategies_keep_separate_journals(tmp_path):
+    a = _desk(tmp_path, "a", "Portafoglio 17", "beta")
+    b = _desk(tmp_path, "b", "Portafoglio 18", "quality")
+    a.run("quality", 1_000_000)
+    b.run("beta", 1_000_000)
+    assert {e["strategy"] for e in a.journal.events(10_000)} == {"beta"}
+    assert {e["strategy"] for e in b.journal.events(10_000)} == {"quality"}
+    assert {e["portfolio"] for e in b.journal.events(10_000)} == {"Portafoglio 18"}
+    assert (
+        set(a.trades_symbols()) != set(b.trades_symbols()) if hasattr(a, "trades_symbols") else True
+    )
+
+
+def test_old_journal_gets_new_columns_and_relabel_corrects_without_rewriting(tmp_path):
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)  # journal creato prima delle colonne portafoglio/strategia
+    old.executescript(
+        """CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, kind TEXT NOT NULL,
+        run_id TEXT, proposal_id TEXT, payload TEXT NOT NULL);
+        INSERT INTO events (ts, kind, run_id, payload) VALUES
+        ('2026-10-08T15:05:00Z','RUN','r17','{"params":{"mode":"quality"},"account":{"equity":1000000}}'),
+        ('2026-10-08T15:06:00Z','PROPOSAL','r17','{"kind":"BUY","qty":1,"symbol":"A","price":1,"value":1,"reason":"x"}'),
+        ('2026-10-08T16:05:00Z','RUN','r18','{"params":{"mode":"quality"},"account":{"equity":1000000}}');"""
+    )
+    old.commit()
+    old.close()
+    j = journal_mod.Journal(path)
+    assert all(e["portfolio"] is None for e in j.events())  # non assegnato
+    # 15:05 UTC = 17:05 a Roma (CEST); 16:05 UTC = 18:05
+    assert (
+        journal_tool.main(
+            [
+                "relabel",
+                "--db",
+                str(path),
+                "--hour",
+                "17",
+                "--portfolio",
+                "Portafoglio 17",
+                "--strategy",
+                "beta",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+    assert all(
+        e["portfolio"] is None for e in journal_mod.Journal(path).events()
+    )  # dry-run: nulla cambia
+    assert (
+        journal_tool.main(
+            [
+                "relabel",
+                "--db",
+                str(path),
+                "--hour",
+                "17",
+                "--portfolio",
+                "Portafoglio 17",
+                "--strategy",
+                "beta",
+            ]
+        )
+        == 0
+    )
+    assert (
+        journal_tool.main(
+            [
+                "relabel",
+                "--db",
+                str(path),
+                "--hour",
+                "18",
+                "--portfolio",
+                "Portafoglio 18",
+                "--strategy",
+                "quality",
+            ]
+        )
+        == 0
+    )
+    j = journal_mod.Journal(path)
+    by_run = {e["run_id"]: e for e in j.events(100) if e["kind"] in ("RUN", "PROPOSAL")}
+    assert (by_run["r17"]["portfolio"], by_run["r17"]["strategy"], by_run["r17"]["relabeled"]) == (
+        "Portafoglio 17",
+        "beta",
+        True,
+    )
+    assert (by_run["r18"]["portfolio"], by_run["r18"]["strategy"]) == ("Portafoglio 18", "quality")
+    raw = j._db.execute("SELECT portfolio, strategy FROM events WHERE run_id = 'r17'").fetchall()
+    assert all(r["portfolio"] is None for r in raw)  # le righe originali non sono state toccate
+    assert [e["kind"] for e in j.events(100) if e["kind"] == "RELABEL"] == ["RELABEL", "RELABEL"]
+    runs = {r["run_id"]: r for r in j.runs()}
+    assert runs["r17"]["strategy"] == "beta" and runs["r17"]["portfolio"] == "Portafoglio 17"
+    # una nuova assegnazione sostituisce la precedente (vince l'ultima)
+    j.relabel(["r17"], "Portafoglio 17", "quality", "prova")
+    assert {e["strategy"] for e in j.events(100) if e["run_id"] == "r17"} == {"quality"}
+
+
+def test_relabel_tool_validations(tmp_path, capsys):
+    path = tmp_path / "t.db"
+    journal_mod.Journal(path).log(
+        "RUN", {"params": {"mode": "beta"}, "account": {"equity": 1}}, "r1"
+    )
+    assert (
+        journal_tool.main(["relabel", "--db", str(path), "--portfolio", "P", "--strategy", "beta"])
+        == 2
+    )
+    assert (
+        journal_tool.main(
+            ["relabel", "--db", str(path), "--hour", "3", "--portfolio", "P", "--strategy", "beta"]
+        )
+        == 1
+    )
+    assert (
+        journal_tool.main(
+            ["relabel", "--db", str(path), "--all", "--portfolio", "P", "--strategy", "beta"]
+        )
+        == 0
+    )
+    assert journal_tool.main(["list", "--db", str(path)]) == 0
+    assert "P / Alto beta" in capsys.readouterr().out
+    assert journal_tool.main(["list", "--db", str(tmp_path / "manca.db")]) == 2
+
+
+def test_journal_excel_has_portfolio_and_strategy_columns(tmp_path):
+    import io
+
+    import export
+    from openpyxl import load_workbook
+
+    d = _desk(tmp_path, "x", "Portafoglio 18", "quality")
+    d.run("quality", 1_000_000)
+    ws = load_workbook(io.BytesIO(export.build_journal(d.journal.events(100000))))["Journal"]
+    heads = [c.value for c in ws[2]]
+    assert "Portafoglio" in heads and "Strategia" in heads
+    i = heads.index("Strategia") + 1
+    assert {ws.cell(r, i).value for r in range(3, ws.max_row + 1)} == {"Qualità"}

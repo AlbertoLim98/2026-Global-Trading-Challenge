@@ -40,9 +40,17 @@ class DeskError(Exception):
 
 class Desk:
     def __init__(
-        self, state: Any, broker: Any, journal: Journal, settle_seconds: float = SETTLE_SECONDS
+        self,
+        state: Any,
+        broker: Any,
+        journal: Journal,
+        settle_seconds: float = SETTLE_SECONDS,
+        portfolio: str | None = None,
+        strategy: str | None = None,
     ) -> None:
+        """`strategy` (beta | quality) fissa la strategia di questo portafoglio; None = scelta libera."""
         self.state, self.broker, self.journal = state, broker, journal
+        self.portfolio_name, self.strategy = portfolio, strategy
         self.settle_seconds = settle_seconds
         self.universe = data.load_universe()
         self.managed = {
@@ -65,7 +73,18 @@ class Desk:
         return out
 
     # --- ribilanciamento giornaliero ---------------------------------------------------------------
+    def info(self) -> dict:
+        return {
+            "portfolio": self.portfolio_name,
+            "strategy": self.strategy,
+            "locked": self.strategy is not None,
+            "broker": self.broker.name,
+        }
+
     def run(self, mode: str = "quality", capital: float = 1_000_000.0) -> dict:
+        mode = (
+            self.strategy or mode
+        )  # un portafoglio con strategia fissa ignora la scelta dell'utente
         if mode not in ("quality", "beta"):
             raise DeskError(f"modalità sconosciuta: {mode}")
         if capital < 10_000:
@@ -116,6 +135,7 @@ class Desk:
             "RUN",
             {
                 "params": p.as_dict(),
+                "portfolio": self.portfolio_name,
                 "broker": self.broker.name,
                 "account": acct,
                 "sector_table": [_slim_sector(r) for r in sectors["sectors"]],

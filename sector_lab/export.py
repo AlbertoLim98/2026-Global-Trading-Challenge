@@ -236,7 +236,7 @@ def build_journal(events: list[dict]) -> bytes:
     """Journal completo (dal più vecchio al più recente) con il dettaglio JSON di ogni evento."""
     import json
 
-    from journal import summarize
+    from journal import STRATEGY_LABEL, summarize
 
     wb = Workbook()
     ws = wb.active
@@ -244,6 +244,8 @@ def build_journal(events: list[dict]) -> bytes:
     cols: list[Col] = [
         ("", "N.", lambda e: e["id"], "0"),
         ("", "Data/ora (UTC)", lambda e: e["ts"], None),
+        ("", "Portafoglio", lambda e: e.get("portfolio"), None),
+        ("", "Strategia", lambda e: STRATEGY_LABEL.get(e.get("strategy"), e.get("strategy")), None),
         ("", "Evento", lambda e: e["kind"], None),
         ("", "Esecuzione", lambda e: e["run_id"], None),
         ("", "Proposta", lambda e: e["proposal_id"], None),
@@ -256,8 +258,6 @@ def build_journal(events: list[dict]) -> bytes:
         ),
     ]
     _sheet(ws, cols, sorted(events, key=lambda e: e["id"]), freeze="A3")
-    ws.column_dimensions["F"].width = 90
-    ws.column_dimensions["G"].width = 60
-    ws.column_dimensions["B"].width = 22
-    ws.column_dimensions["D"].width = 24
+    for col, width in {"B": 22, "C": 18, "D": 12, "F": 24, "G": 14, "H": 90, "I": 60}.items():
+        ws.column_dimensions[col].width = width
     return _save(wb)

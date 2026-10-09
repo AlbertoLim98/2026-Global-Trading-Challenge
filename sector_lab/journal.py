@@ -35,6 +35,9 @@ CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
 BEGIN SELECT RAISE(ABORT, 'journal append-only'); END;
 """
 
+STRATEGY_LABEL = {"beta": "Alto beta", "quality": "Qualità"}
+RELABEL = "RELABEL"  # evento di riclassificazione: il registro resta in sola aggiunta
+
 # stati "attivi": ordine in corso oppure fallito e ancora da gestire
 ACTIVE_STATUSES = ("submitted", "failed")
 
@@ -48,11 +51,22 @@ def iso(dt: datetime) -> str:
 
 
 class Journal:
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self, path: str | Path, portfolio: str | None = None, strategy: str | None = None
+    ) -> None:
+        """`portfolio` e `strategy` sono scritti in ogni nuovo evento (None = non assegnato)."""
         self._db = sqlite3.connect(str(path), check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.executescript(SCHEMA)
         self._lock = threading.RLock()
+        self.portfolio, self.strategy = portfolio, strategy
+        with (
+            self._db
+        ):  # journal creati prima di queste colonne: si aggiungono senza toccare le righe
+            cols = {r["name"] for r in self._db.execute("PRAGMA table_info(events)")}
+            for c in ("portfolio", "strategy"):
+                if c not in cols:
+                    self._db.execute(f"ALTER TABLE events ADD COLUMN {c} TEXT")
 
     # --- registro -------------------------------------------------------------------------------
     def log(
@@ -60,8 +74,17 @@ class Journal:
     ) -> int:
         with self._lock, self._db:
             cur = self._db.execute(
-                "INSERT INTO events (ts, kind, run_id, proposal_id, payload) VALUES (?,?,?,?,?)",
-                (iso(now()), kind, run_id, proposal_id, json.dumps(payload, default=str)),
+                "INSERT INTO events (ts, kind, run_id, proposal_id, payload, portfolio, strategy)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (
+                    iso(now()),
+                    kind,
+                    run_id,
+                    proposal_id,
+                    json.dumps(payload, default=str),
+                    self.portfolio,
+                    self.strategy,
+                ),
             )
             return int(cur.lastrowid)
 
@@ -81,7 +104,84 @@ class Journal:
         q += " ORDER BY id DESC LIMIT ?"
         with self._lock:
             rows = self._db.execute(q, [*args, limit]).fetchall()
-        return [{**dict(r), "payload": json.loads(r["payload"])} for r in rows]
+        labels = self.labels()
+        return [
+            {**dict(r), **self._effective(r, labels), "payload": json.loads(r["payload"])}
+            for r in rows
+        ]
+
+    # --- etichette portafoglio / strategia ---------------------------------------------------------
+    def labels(self) -> dict[str, dict]:
+        """Ultima riclassificazione di ogni esecuzione (run_id -> portafoglio, strategia)."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT payload FROM events WHERE kind = ? ORDER BY id ASC", (RELABEL,)
+            ).fetchall()
+        out: dict[str, dict] = {}
+        for r in rows:
+            p = json.loads(r["payload"])
+            for rid in p.get("run_ids", []):
+                out[rid] = {"portfolio": p.get("portfolio"), "strategy": p.get("strategy")}
+        return out
+
+    @staticmethod
+    def _effective(row: sqlite3.Row, labels: dict[str, dict]) -> dict:
+        """Etichetta valida di un evento: la riclassificazione vince su quella scritta alla nascita."""
+        lab = labels.get(row["run_id"]) if row["run_id"] else None
+        return {
+            "portfolio": lab["portfolio"] if lab else row["portfolio"],
+            "strategy": lab["strategy"] if lab else row["strategy"],
+            "relabeled": lab is not None,
+        }
+
+    def relabel(self, run_ids: list[str], portfolio: str, strategy: str, reason: str = "") -> int:
+        """Assegna portafoglio e strategia a esecuzioni già registrate, senza modificare le righe."""
+        if strategy not in STRATEGY_LABEL:
+            raise ValueError(f"strategia sconosciuta: {strategy}")
+        before = {r: self.labels().get(r) for r in run_ids}
+        self.log(
+            RELABEL,
+            {
+                "run_ids": run_ids,
+                "portfolio": portfolio,
+                "strategy": strategy,
+                "reason": reason,
+                "previous": before,
+            },
+        )
+        return len(run_ids)
+
+    def run_catalog(self) -> list[dict]:
+        """Tutte le esecuzioni (anche controlli stop) con ora, strategia registrata ed etichetta valida."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT run_id, MIN(ts) AS first_ts, COUNT(*) AS n, GROUP_CONCAT(DISTINCT kind) AS kinds,"
+                " MIN(portfolio) AS portfolio, MIN(strategy) AS strategy"
+                " FROM events WHERE run_id IS NOT NULL GROUP BY run_id ORDER BY first_ts, run_id"
+            ).fetchall()
+            runs = self._db.execute(
+                "SELECT run_id, payload FROM events WHERE kind = 'RUN'"
+            ).fetchall()
+        recorded = {
+            r["run_id"]: (json.loads(r["payload"]).get("params") or {}).get("mode") for r in runs
+        }
+        labels = self.labels()
+        out = []
+        for r in rows:
+            lab = labels.get(r["run_id"])
+            out.append(
+                {
+                    "run_id": r["run_id"],
+                    "ts": r["first_ts"],
+                    "n_events": r["n"],
+                    "kinds": r["kinds"],
+                    "recorded_mode": recorded.get(r["run_id"]),
+                    "portfolio": lab["portfolio"] if lab else r["portfolio"],
+                    "strategy": lab["strategy"] if lab else r["strategy"],
+                    "relabeled": lab is not None,
+                }
+            )
+        return out
 
     # --- proposte ---------------------------------------------------------------------------------
     def add_proposal(self, run_id: str, prop: dict) -> None:
@@ -164,14 +264,20 @@ class Journal:
         """Riallocazioni (esecuzioni complete) dalla più vecchia: data, patrimonio al via, modalità."""
         with self._lock:
             rows = self._db.execute(
-                "SELECT ts, run_id, payload FROM events WHERE kind = 'RUN' ORDER BY id ASC"
+                "SELECT ts, run_id, payload, portfolio, strategy FROM events WHERE kind = 'RUN' ORDER BY id ASC"
             ).fetchall()
         out = []
+        labels = self.labels()
         for r in rows:
             p = json.loads(r["payload"])
+            lab = labels.get(r["run_id"]) or {}
             out.append(
                 {
                     "run_id": r["run_id"],
+                    "portfolio": lab.get("portfolio") or r["portfolio"],
+                    "strategy": lab.get("strategy")
+                    or r["strategy"]
+                    or (p.get("params") or {}).get("mode"),
                     "ts": r["ts"],
                     "equity": (p.get("account") or {}).get("equity"),
                     "mode": (p.get("params") or {}).get("mode"),
@@ -238,6 +344,12 @@ def summarize(kind: str, p: dict) -> str:
         return f"Esito della proposta: {p.get('status')} (ordine {p.get('order_id')}, {p.get('order_status')})"
     if kind == "STOP_CHECK":
         return f"Controllo stop ATR: {p.get('n_new', 0)} nuove proposte su {p.get('n_positions', 0)} posizioni"
+    if kind == RELABEL:
+        n = len(p.get("run_ids", []))
+        return (
+            f"Riclassificate {n} esecuzioni: {p.get('portfolio')} / "
+            f"{STRATEGY_LABEL.get(p.get('strategy'), p.get('strategy'))}"
+        )
     if kind == "SUPERSEDED":
         return f"Operazione fallita archiviata dalla nuova esecuzione {p.get('by_run')}"
     if kind == "ERROR":

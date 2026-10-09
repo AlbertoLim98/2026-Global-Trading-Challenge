@@ -92,6 +92,39 @@ La scheda **Portafoglio paper** mostra la composizione (titoli con peso, P/L di 
 ripartizione per settore), il guadagno/perdita dall'ultima riallocazione, per ogni riallocazione (patrimonio al via di una e della
 successiva) e da apertura portafoglio (patrimonio al primo ribilanciamento registrato) e, in un elenco a parte, i movimenti eseguiti oggi (giorno di borsa di New York).
 
+### Due portafogli con strategie diverse
+
+Ogni portafoglio è un'istanza del programma con **conto Alpaca paper, journal e strategia propri**
+(le posizioni dei due portafogli non si mescolano). La strategia (`beta` = alto beta, `quality` =
+qualità) è fissa e compare nell'intestazione; ogni evento del journal ne porta nome e strategia.
+
+```bash
+# ognuno con il proprio file di chiavi (stesse variabili di .env.example) e la propria porta
+uv run python sector_lab/server.py --portfolio "Portafoglio 17" --strategy beta    --env .env.p17 --port 8770
+uv run python sector_lab/server.py --portfolio "Portafoglio 18" --strategy quality --env .env.p18 --port 8771
+```
+
+Il journal di ciascuno è `sector_lab/journal_<nome>.db` (cambialo con `--journal`). Per tenere un
+journal già esistente, passa il suo percorso con `--journal`.
+
+**Correggere i dati precedenti.** Il journal è in sola aggiunta, quindi le righe vecchie non si
+modificano: si registra un evento di riclassificazione che interfaccia ed Excel applicano a tutte le
+righe di quelle esecuzioni (vince l'ultima assegnazione). Corregge l'etichetta, non ciò che è stato
+eseguito sul conto.
+
+```bash
+uv run python sector_lab/journal_tool.py list    --db sector_lab/journal.db   # esecuzioni, ora locale, modalità registrata
+uv run python sector_lab/journal_tool.py relabel --db sector_lab/journal.db --hour 17 \
+    --portfolio "Portafoglio 17" --strategy beta --dry-run                       # anteprima
+uv run python sector_lab/journal_tool.py relabel --db sector_lab/journal.db --hour 17 \
+    --portfolio "Portafoglio 17" --strategy beta
+uv run python sector_lab/journal_tool.py relabel --db sector_lab/journal.db --hour 18 \
+    --portfolio "Portafoglio 18" --strategy quality
+```
+
+Selezione: `--hour` (ora locale, fuso `--tz`, default Europe/Rome; con `--date AAAA-MM-GG` per un
+giorno), `--run-id` (ripetibile) oppure `--all`.
+
 **Titoli non negoziabili:** a ogni ribilanciamento il programma chiede ad Alpaca l'elenco delle azioni
 attive e negoziabili ed esclude dall'elenco quelle che non lo sono (fusi, ritirati, sospesi: es. un
 errore "asset WBD is not active"). Vale anche per la scheda Aziende. Dopo un errore di questo tipo
