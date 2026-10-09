@@ -180,6 +180,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--to", help="split: percorso del journal NUOVO in cui copiare le esecuzioni scelte"
     )
+    ap.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="split: sostituisce il journal di destinazione se esiste già",
+    )
     a = ap.parse_args(argv)
 
     if not Path(a.db).exists():
