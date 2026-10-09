@@ -56,6 +56,19 @@ def credentials(path: str | Path) -> tuple[str, str]:
     return key, secret
 
 
+def clean_equity(s: pd.Series, max_dev: float = 0.5) -> tuple[pd.Series, list[float]]:
+    """Toglie dallo storico i punti impossibili (patrimonio <= 0 o oltre `max_dev` dalla mediana).
+
+    Lo storico intraday di Alpaca a volte contiene valori anomali (soprattutto su conti azzerati o appena
+    ricreati): lasciarli falserebbe rendimento e volatilità. Restituisce la serie pulita e i valori scartati.
+    """
+    if s.empty:
+        return s, []
+    med = float(s.median())
+    bad = (s <= 0) | ((s / med - 1).abs() > max_dev)
+    return s[~bad], [float(v) for v in s[bad]]
+
+
 def snapshot(
     broker, name: str, period: str, creds: tuple[str, str] | None = None, timeframe: str = "1D"
 ) -> dict:
@@ -67,7 +80,9 @@ def snapshot(
         p["weight"] = p["market_value"] / equity if equity else 0.0
     hist = pd.Series(dict(broker.portfolio_history(period, timeframe)), dtype=float)
     hist.index = pd.to_datetime(hist.index)
+    hist, dropped = clean_equity(hist.sort_index())
     return {
+        "dropped": dropped,
         "name": name,
         "account": acct,
         "positions": pos,
@@ -297,6 +312,13 @@ def report(res: dict, ja: dict | None = None, jb: dict | None = None) -> str:
     def row(label, va, vb):
         L.append(f"{label:<34}{va:>22}{vb:>22}")
 
+    for x in (a, b):
+        if x.get("dropped"):
+            ex = ", ".join(f"{v:,.0f}" for v in x["dropped"][:4])
+            L.insert(
+                0,
+                f"ATTENZIONE: scartati {len(x['dropped'])} punti anomali dallo storico di {x['name']} (es. {ex}$).",
+            )
     row("Patrimonio", _f(a["account"]["equity"], "usd"), _f(b["account"]["equity"], "usd"))
     row("Liquidità", _f(a["cash_weight"], "p"), _f(b["cash_weight"], "p"))
     row("N. titoli", str(len(a["positions"])), str(len(b["positions"])))

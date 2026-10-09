@@ -202,3 +202,36 @@ def test_cli_from_option_shortens_the_window(tmp_path, capsys):
     n_full = int(full.split("rilevazioni")[0].rsplit("(", 1)[1])
     n_short = int(short.split("rilevazioni")[0].rsplit("(", 1)[1])
     assert n_short < n_full
+
+
+def test_clean_equity_drops_impossible_points_but_keeps_real_moves():
+    import pandas as pd
+
+    idx = pd.date_range("2026-10-09 14:30", periods=8, freq="15min")
+    s = pd.Series(
+        [1_000_000, 1_001_000, -5_200_000, 1_002_000, 90_000, 1_000_500, 999_000, 1_003_000.0],
+        index=idx,
+    )
+    clean, dropped = cp.clean_equity(s)
+    assert dropped == [-5_200_000.0, 90_000.0] and len(clean) == 6
+    assert clean.min() > 900_000 and clean.index.is_monotonic_increasing
+    ok, none = cp.clean_equity(s.drop(s.index[[2, 4]]))
+    assert none == [] and len(ok) == 6
+
+
+def test_glitchy_history_does_not_produce_absurd_returns_and_is_reported():
+    import pandas as pd
+
+    ba, bb = cp._demo_brokers()
+    bad = list(bb.history)
+    bad[5] = (bad[5][0], -7_300_000.0)  # punto impossibile come quello visto su Alpaca
+    bad[9] = (bad[9][0], 120_000.0)
+    bb.history = bad
+    a, b = cp.snapshot(ba, "A", "1M"), cp.snapshot(bb, "B", "1M")
+    assert len(b["dropped"]) == 2 and a["dropped"] == []
+    res = cp.compare(a, b)
+    m = res["window"]["b"]
+    assert abs(m["total_return"]) < 0.2 and m["max_drawdown"] > -0.2 and (m["vol"] or 0) < 1
+    txt = cp.report(res)
+    assert "ATTENZIONE: scartati 2 punti anomali dallo storico di B" in txt
+    assert isinstance(pd.Series(b["history"]).min(), float) and b["history"].min() > 0
