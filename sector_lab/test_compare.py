@@ -48,7 +48,7 @@ def test_overlap_sectors_and_weights_are_consistent():
 
 
 def test_window_metrics_use_only_common_days_and_curve_is_base_100():
-    res, a, b = _res()
+    res, a, _ = _res()
     w = res["window"]
     s = a["history"]
     assert w["a"]["total_return"] == pytest.approx(s.iloc[-1] / s.iloc[0] - 1)
