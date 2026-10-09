@@ -29,6 +29,22 @@ CREATE TABLE IF NOT EXISTS proposals (
     data TEXT NOT NULL,
     updated TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS indicators (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    portfolio TEXT,
+    strategy TEXT,
+    kind TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    selected INTEGER NOT NULL,
+    target_value REAL,
+    data TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS indicators_no_update BEFORE UPDATE ON indicators
+BEGIN SELECT RAISE(ABORT, 'journal append-only'); END;
+CREATE TRIGGER IF NOT EXISTS indicators_no_delete BEFORE DELETE ON indicators
+BEGIN SELECT RAISE(ABORT, 'journal append-only'); END;
 CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events
 BEGIN SELECT RAISE(ABORT, 'journal append-only'); END;
 CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
@@ -109,6 +125,92 @@ class Journal:
             {**dict(r), **self._effective(r, labels), "payload": json.loads(r["payload"])}
             for r in rows
         ]
+
+    # --- valori degli indicatori che hanno composto i punteggi ----------------------------------------
+    def log_indicators(self, run_id: str, rows: list[dict]) -> int:
+        """Salva, per un ribilanciamento, tutti gli indicatori e i punteggi di ogni titolo/settore considerato.
+
+        Ogni riga: kind ("stock" | "sector"), symbol, selected (0/1), target_value, data (dict con i valori).
+        """
+        ts = iso(now())
+        with self._lock, self._db:
+            self._db.executemany(
+                "INSERT INTO indicators (ts, run_id, portfolio, strategy, kind, symbol, selected, target_value, data)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
+                [
+                    (
+                        ts,
+                        run_id,
+                        self.portfolio,
+                        self.strategy,
+                        r["kind"],
+                        r["symbol"],
+                        int(bool(r.get("selected"))),
+                        r.get("target_value"),
+                        json.dumps(r["data"], default=str),
+                    )
+                    for r in rows
+                ],
+            )
+        return len(rows)
+
+    def indicators(self, run_id: str | None = None) -> list[dict]:
+        """Indicatori di ogni ribilanciamento. Per i ribilanciamenti vecchi, senza tabella dedicata, si ricavano
+        dai dati che il RUN ha registrato (meno completi: solo i campi allora salvati)."""
+        labels = self.labels()
+        with self._lock:
+            q = (
+                "SELECT * FROM indicators"
+                + (" WHERE run_id = ?" if run_id else "")
+                + " ORDER BY id"
+            )
+            rows = self._db.execute(q, [run_id] if run_id else []).fetchall()
+            runs = self._db.execute(
+                "SELECT ts, run_id, payload, portfolio, strategy FROM events WHERE kind = 'RUN' ORDER BY id"
+            ).fetchall()
+        out = []
+        have = set()
+        for r in rows:
+            lab = labels.get(r["run_id"]) or {}
+            have.add(r["run_id"])
+            out.append(
+                {
+                    "run_id": r["run_id"],
+                    "ts": r["ts"],
+                    "portfolio": lab.get("portfolio") or r["portfolio"],
+                    "strategy": lab.get("strategy") or r["strategy"],
+                    "kind": r["kind"],
+                    "symbol": r["symbol"],
+                    "selected": bool(r["selected"]),
+                    "target_value": r["target_value"],
+                    "source": "completo",
+                    "data": json.loads(r["data"]),
+                }
+            )
+        for r in runs:
+            if r["run_id"] in have or (run_id and r["run_id"] != run_id):
+                continue
+            p = json.loads(r["payload"])
+            lab = labels.get(r["run_id"]) or {}
+            meta = {
+                "run_id": r["run_id"],
+                "ts": r["ts"],
+                "portfolio": lab.get("portfolio") or r["portfolio"] or p.get("portfolio"),
+                "strategy": lab.get("strategy")
+                or r["strategy"]
+                or (p.get("params") or {}).get("mode"),
+                "source": "dal RUN (parziale)",
+            }
+            tv = {t["symbol"]: t["value"] for t in p.get("targets", [])}
+            for row in p.get("sector_table") or []:
+                out.append({**meta, "kind": "sector", "symbol": row["symbol"], "selected": False,
+                            "target_value": None, "data": row})  # fmt: skip
+            tables = [x for rows_ in (p.get("stock_tables") or {}).values() for x in rows_]
+            tables += p.get("short_table") or []
+            for row in tables:
+                out.append({**meta, "kind": "stock", "symbol": row["symbol"], "selected": row["symbol"] in tv,
+                            "target_value": tv.get(row["symbol"]), "data": row})  # fmt: skip
+        return out
 
     # --- etichette portafoglio / strategia ---------------------------------------------------------
     def labels(self) -> dict[str, dict]:

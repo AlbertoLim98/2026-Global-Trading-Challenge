@@ -377,7 +377,8 @@ def make_handler(state: State, desk: desk_mod.Desk, port: int) -> type[BaseHTTPR
                 elif url.path == "/api/journal.xlsx":
                     ev = desk.journal.events(100000)
                     self._xlsx(
-                        export.build_journal(ev), f"journal_{time.strftime('%Y-%m-%d')}.xlsx"
+                        export.build_journal(ev, desk.journal.indicators()),
+                        f"journal_{time.strftime('%Y-%m-%d')}.xlsx",
                     )
                 else:
                     self._json({"error": "non trovato"}, 404)

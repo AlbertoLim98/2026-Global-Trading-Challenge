@@ -171,6 +171,9 @@ class Desk:
             },
             run_id,
         )
+        self.journal.log_indicators(
+            run_id, _indicator_rows(tg, sectors["sectors"], by_etf, view)
+        )  # tutti gli indicatori che hanno composto i punteggi
         for pr in res["proposals"]:
             self.journal.add_proposal(run_id, pr)
         outcome = self._execute_all([pr["id"] for pr in res["proposals"]])
@@ -523,6 +526,27 @@ class Desk:
             "sectors": sorted(by_sector.values(), key=lambda d: -d["value"]),
             "movements": self.movements_today(),
         }
+
+
+def _indicator_rows(
+    tg: dict, sector_rows: list[dict], by_etf: dict[str, dict], view: dict | None
+) -> list[dict]:
+    """Righe complete (tutti i valori calcolati) di settori e titoli valutati in un ribilanciamento."""
+    targets = tg["targets"]
+    budget = {s["symbol"]: s.get("budget") for s in tg.get("sectors", [])}
+    rows = [
+        {"kind": "sector", "symbol": r["symbol"], "selected": bool(budget.get(r["symbol"])),
+         "target_value": budget.get(r["symbol"]), "data": r}
+        for r in sector_rows
+    ]  # fmt: skip
+    stocks_ = [{**r, "sector": etf} for etf, v in by_etf.items() for r in v["top"]]
+    stocks_ += view["rows"] if view else []
+    rows += [
+        {"kind": "stock", "symbol": r["symbol"], "selected": r["symbol"] in targets,
+         "target_value": targets[r["symbol"]]["value"] if r["symbol"] in targets else None, "data": r}
+        for r in stocks_
+    ]  # fmt: skip
+    return rows
 
 
 def _slim_sector(r: dict) -> dict:

@@ -163,6 +163,12 @@ portafoglio (quello dato con `--portfolio`, altrimenti `Conto <numero del conto 
 calcolare le posizioni di quel ribilanciamento (`quality`, `beta` o `short`); si vedono nelle schede Journal,
 Portafoglio e Ribilancio e nell'Excel.
 
+**Indicatori nel journal.** Ad ogni ribilanciamento il journal salva, in una tabella dedicata, tutti i valori che hanno
+composto i punteggi: per la strategia a 1 giorno i 9 indicatori grezzi e i 7 pilastri di tutti i ~500 titoli; per
+Qualità e Alto beta tutti gli indicatori di settori (11) e aziende (top 10 per settore); per ognuno se è stato
+selezionato e con quale valore target. Nell'Excel del journal sono nel foglio **Indicatori**. Per i ribilanciamenti
+vecchi lo stesso foglio si ricava dai dati che il RUN aveva registrato (parziali: sono indicati come "dal RUN").
+
 Il **Journal** (SQLite `sector_lab/journal.db`, solo accodamento: modifiche e cancellazioni sono
 bloccate) registra ogni esecuzione con le tabelle usate e i target, ogni proposta, decisione,
 ordine, esito ed errore; è consultabile nella scheda e scaricabile in Excel.

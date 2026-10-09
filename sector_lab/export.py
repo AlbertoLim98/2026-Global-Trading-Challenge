@@ -233,9 +233,8 @@ def build_stocks(
     return _save(wb)
 
 
-def build_journal(events: list[dict]) -> bytes:
+def build_journal(events: list[dict], indicators: list[dict] | None = None) -> bytes:
     """Journal completo (dal più vecchio al più recente) con il dettaglio JSON di ogni evento."""
-    import json
 
     from journal import STRATEGY_LABEL, summarize
 
@@ -254,14 +253,77 @@ def build_journal(events: list[dict]) -> bytes:
         (
             "",
             "Dettaglio (JSON)",
-            lambda e: json.dumps(e["payload"], ensure_ascii=False, default=str)[:32000],
+            lambda e: _detail(e),
             None,
         ),
     ]
     _sheet(ws, cols, sorted(events, key=lambda e: e["id"]), freeze="A3")
     for col, width in {"B": 22, "C": 18, "D": 12, "F": 24, "G": 14, "H": 90, "I": 60}.items():
         ws.column_dimensions[col].width = width
+    if indicators:
+        _indicators_sheet(wb, indicators)
     return _save(wb)
+
+
+HEAVY = ("sector_table", "stock_tables", "short_table", "sector_budgets", "targets")
+
+
+def _detail(e: dict) -> str:
+    """Dettaglio JSON di un evento; per il RUN le tabelle grandi stanno nel foglio Indicatori (niente troncature)."""
+    import json
+
+    p = e["payload"]
+    if e["kind"] == "RUN":
+        p = {k: ("(vedi foglio Indicatori)" if k in HEAVY and v else v) for k, v in p.items()}
+    return json.dumps(p, ensure_ascii=False, default=str)[:32000]
+
+
+def _flat(d: dict, prefix: str = "") -> dict:
+    out = {}
+    for k, v in d.items():
+        key = f"{prefix}{k}"
+        if isinstance(v, dict):
+            out |= _flat(v, key + ".")
+        elif isinstance(v, (list, tuple)):
+            out[key] = ", ".join(map(str, v))
+        else:
+            out[key] = v
+    return out
+
+
+def _indicators_sheet(wb: Workbook, rows: list[dict]) -> None:
+    """Un foglio con, per ogni ribilanciamento, tutti gli indicatori e punteggi di ogni titolo e settore."""
+    from journal import STRATEGY_LABEL
+
+    flat = [_flat(r["data"]) for r in rows]
+    keys: list[str] = []
+    seen: set[str] = set()
+    for f in flat:
+        for k in f:
+            if k not in seen:
+                seen.add(k)
+                keys.append(k)
+    head = ["Esecuzione", "Data/ora (UTC)", "Portafoglio", "Strategia", "Tipo", "Simbolo", "Selezionato",
+            "Valore target ($)", "Origine dati", *keys]  # fmt: skip
+    ws = wb.create_sheet("Indicatori")
+    for j, h in enumerate(head, 1):
+        c = ws.cell(1, j, h)
+        c.font = Font(bold=True)
+        c.alignment = Alignment(wrap_text=True, vertical="center")
+    for i, (r, f) in enumerate(zip(rows, flat, strict=True), 2):
+        base = [r["run_id"], r["ts"], r["portfolio"], STRATEGY_LABEL.get(r["strategy"], r["strategy"]),
+                "settore" if r["kind"] == "sector" else "titolo", r["symbol"],
+                "sì" if r["selected"] else "no", r["target_value"], r.get("source", "")]  # fmt: skip
+        for j, v in enumerate(base, 1):
+            ws.cell(i, j, v)
+        for j, k in enumerate(keys, len(base) + 1):
+            v = f.get(k)
+            ws.cell(i, j, None if isinstance(v, float) and math.isnan(v) else v)
+    ws.freeze_panes = "G2"
+    ws.column_dimensions["A"].width = 24
+    ws.column_dimensions["B"].width = 20
+    ws.column_dimensions["C"].width = 18
+    ws.column_dimensions["D"].width = 22
 
 
 def build_short(view: dict, ic: dict | None = None) -> bytes:

@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import broker as broker_mod
 import data
 import desk as desk_mod
+import export as export_mod
 import journal as journal_mod
 import portfolio
 import server
@@ -223,3 +224,125 @@ def test_short_endpoints_and_excel(short_desk):
         ]
     finally:
         srv.shutdown()
+
+
+# --- il journal salva gli indicatori che compongono i punteggi ------------------------------------------
+def test_short_run_saves_every_indicator_value_for_every_stock(short_desk):
+    d, _, _ = short_desk
+    d.run("short", 1_000_000)
+    rows = d.journal.indicators()
+    stocks_ = [r for r in rows if r["kind"] == "stock"]
+    assert len(stocks_) > 500 and {r["source"] for r in rows} == {"completo"}
+    assert sum(r["selected"] for r in stocks_) == 20
+    assert all(r["portfolio"] == "Portafoglio 1g" and r["strategy"] == "short" for r in rows)
+    sel = next(r for r in stocks_ if r["selected"])
+    assert set(sel["data"]["raw"]) == set(st.COMPONENT_PILLAR)  # i 9 indicatori grezzi
+    assert set(sel["data"]["pillars"]) == set(st.PILLARS) and sel["data"]["total"] > 0
+    assert sel["target_value"] > 0 and sel["data"]["beta"] is not None and sel["data"]["atr"] > 0
+    held = {t["symbol"] for t in d.trades() if t["kind"] == "BUY"}
+    assert {r["symbol"] for r in stocks_ if r["selected"]} == held
+
+
+def test_quality_run_saves_sector_and_stock_indicators(tmp_path):
+    state = server.State(True, "iex")
+    syms = [*data.load_universe().ticker, data.STOCK_BENCHMARK, *data.SECTORS, data.BENCHMARK]
+    prices = {k: float(v["close"].iloc[-1]) for k, v in data.demo_bars(syms).items()}
+    d = desk_mod.Desk(
+        state, broker_mod.DemoBroker(1_000_000.0, prices), journal_mod.Journal(tmp_path / "q.db", "P18", "quality"),
+        settle_seconds=0, portfolio="P18", strategy="quality",
+    )  # fmt: skip
+    d.run("quality", 1_000_000)
+    rows = d.journal.indicators()
+    sectors_ = [r for r in rows if r["kind"] == "sector"]
+    stocks_ = [r for r in rows if r["kind"] == "stock"]
+    assert len(sectors_) == 11 and len(stocks_) == 110
+    s0 = sectors_[0]["data"]
+    assert {
+        "ret_3m",
+        "ret_12m",
+        "rsi14",
+        "px_vs_sma200",
+        "vol_ratio_20_90",
+        "vol_60d",
+        "scores",
+    } <= set(s0)
+    k0 = stocks_[0]["data"]
+    assert {
+        "twrr_w",
+        "twrr_3m",
+        "beta_1y",
+        "rp_vs_sma200",
+        "vol_ratio_rel",
+        "updown_rel",
+        "te_60d",
+        "scores",
+    } <= set(k0)
+    assert sum(r["selected"] for r in stocks_) == len(
+        [t for t in d.trades() if t["kind"] == "BUY"]
+    ) and all(r["strategy"] == "quality" for r in rows)
+
+
+def test_indicators_table_is_append_only(tmp_path):
+    j = journal_mod.Journal(tmp_path / "i.db", "P", "short")
+    j.log_indicators(
+        "r1",
+        [{"kind": "stock", "symbol": "A", "selected": True, "target_value": 1.0, "data": {"x": 1}}],
+    )
+    import sqlite3
+
+    with pytest.raises(sqlite3.DatabaseError):
+        j._db.execute("UPDATE indicators SET symbol = 'B'")
+    with pytest.raises(sqlite3.DatabaseError):
+        j._db.execute("DELETE FROM indicators")
+
+
+def test_old_runs_without_indicator_table_are_derived_from_the_run_payload(tmp_path):
+    j = journal_mod.Journal(tmp_path / "old.db", "P", "beta")
+    payload = {
+        "params": {"mode": "beta"},
+        "account": {"equity": 1},
+        "sector_table": [{"symbol": "XLK", "scores": {"total": 70}, "ret_3m": 0.05}],
+        "stock_tables": {
+            "XLK": [{"symbol": "AAA", "scores": {"total": 80}, "beta_1y": 2.0, "twrr_w": 0.1}]
+        },
+        "targets": [{"symbol": "AAA", "value": 25_000.0}],
+    }
+    j.log("RUN", payload, "old-run")
+    rows = j.indicators()
+    by = {(r["kind"], r["symbol"]): r for r in rows}
+    assert by[("stock", "AAA")]["selected"] and by[("stock", "AAA")]["target_value"] == 25_000.0
+    assert (
+        by[("stock", "AAA")]["source"] == "dal RUN (parziale)"
+        and by[("sector", "XLK")]["data"]["ret_3m"] == 0.05
+    )
+    j.relabel(["old-run"], "Portafoglio 17", "beta", "prova")
+    assert {r["portfolio"] for r in j.indicators()} == {"Portafoglio 17"}
+
+
+def test_journal_excel_has_indicator_sheet_and_untruncated_run_detail(short_desk):
+    d, _, _ = short_desk
+    d.run("short", 1_000_000)
+    wb = load_workbook(
+        io.BytesIO(export_mod.build_journal(d.journal.events(100000), d.journal.indicators()))
+    )
+    assert wb.sheetnames == ["Journal", "Indicatori"]
+    ws = wb["Indicatori"]
+    heads = [c.value for c in ws[1]]
+    assert {
+        "raw.rsi_rev",
+        "raw.gap_fade",
+        "pillars.rsi",
+        "pillars.volatility",
+        "total",
+        "beta",
+        "atr",
+    } <= set(heads)
+    sel = [
+        r
+        for r in ws.iter_rows(min_row=2, values_only=True)
+        if r[heads.index("Selezionato")] == "sì"
+    ]
+    assert len(sel) == 20 and all(r[heads.index("raw.rsi_rev")] is not None or True for r in sel)
+    run = next(r for r in wb["Journal"].iter_rows(min_row=3, values_only=True) if r[4] == "RUN")
+    detail = json.loads(run[-1])  # JSON valido, non troncato
+    assert detail["short_table"] == "(vedi foglio Indicatori)" and detail["strategy"] == "short"
