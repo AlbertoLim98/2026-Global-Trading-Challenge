@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 import uuid
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from net import with_retry
@@ -29,6 +30,7 @@ class Broker(Protocol):
     ) -> dict: ...
     def get_order(self, order_id: str) -> dict: ...
     def cancel_order(self, order_id: str) -> str: ...
+    def portfolio_history(self, period: str = "1M") -> list[tuple[str, float]]: ...
 
 
 def _num(v: Any) -> float | None:
@@ -166,6 +168,18 @@ class AlpacaBroker:
     def get_order(self, order_id: str) -> dict:
         return _order(with_retry(lambda: self._t.get_order_by_id(order_id)))
 
+    def portfolio_history(self, period: str = "1M") -> list[tuple[str, float]]:
+        """Patrimonio di fine giornata del conto: lista di (data AAAA-MM-GG, patrimonio), senza i giorni a zero."""
+        from alpaca.trading.requests import GetPortfolioHistoryRequest
+
+        req = GetPortfolioHistoryRequest(period=period, timeframe="1D")
+        h = with_retry(lambda: self._t.get_portfolio_history(req))
+        return [
+            (datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d"), float(eq))
+            for ts, eq in zip(h.timestamp or [], h.equity or [], strict=False)
+            if eq
+        ]
+
     def cancel_order(self, order_id: str) -> str:
         """Annulla un ordine aperto. Esito: canceled | not_found (conto diverso o azzerato) | not_cancelable."""
         from alpaca.common.exceptions import APIError
@@ -290,6 +304,9 @@ class DemoBroker:
             if o["order_id"] == order_id:
                 return o
         raise OrderNotFound(f"order not found: {order_id}")
+
+    def portfolio_history(self, period: str = "1M") -> list[tuple[str, float]]:
+        return list(getattr(self, "history", []))  # serie di prova (data, patrimonio)
 
     def cancel_order(self, order_id: str) -> str:
         for o in self.orders.values():

@@ -1,0 +1,544 @@
+"""Confronta due portafogli Alpaca paper, ognuno con il proprio file di chiavi (.env).
+
+Sola lettura: non invia ordini. Per ogni portafoglio legge conto, posizioni e storico del patrimonio, e (se
+indicato) un riepilogo del journal; poi confronta rendimento, rischio, composizione, sovrapposizione dei titoli
+e dei settori, anche rispetto a SPY. Stampa un riepilogo e scrive un Excel.
+
+    uv run python sector_lab/compare_portfolios.py --env-a .env.p17 --env-b .env.p18 \\
+        --name-a "Portafoglio 17" --name-b "Portafoglio 18" --period 1M
+
+(su PowerShell scrivi il comando su una riga sola)
+
+Opzioni utili: --journal-a/--journal-b (percorso del journal di ciascuno), --period (1W, 1M, 3M, 1A, all),
+--out (file Excel), --feed (iex|sip), --demo (conti simulati, senza chiavi).
+"""
+
+from __future__ import annotations
+
+import argparse
+import math
+import sqlite3
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import data
+from export import Col, Workbook, _notes_sheet, _save, _sheet
+from journal import STRATEGY_LABEL
+
+PCT, PCT2, NUM, MONEY = "0.0%", "0.00%", "0.00", "#,##0"
+
+
+# --- lettura dei dati ------------------------------------------------------------------------------
+def read_env(path: str | Path) -> dict[str, str]:
+    """Legge KEY=VALUE da un file .env senza toccare le variabili d'ambiente del processo."""
+    out: dict[str, str] = {}
+    for line in Path(path).read_text(encoding="utf-8-sig").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            out[k.strip()] = v.strip().strip("\"'")
+    return out
+
+
+def credentials(path: str | Path) -> tuple[str, str]:
+    env = read_env(path)
+    key, secret = env.get("ALPACA_API_KEY", ""), env.get("ALPACA_SECRET_KEY", "")
+    if not key or not secret:
+        raise SystemExit(f"{path}: mancano ALPACA_API_KEY e/o ALPACA_SECRET_KEY")
+    return key, secret
+
+
+def snapshot(broker, name: str, period: str, creds: tuple[str, str] | None = None) -> dict:
+    """Foto di un portafoglio: conto, posizioni (con peso) e storico del patrimonio."""
+    acct = broker.account()
+    equity = acct["equity"]
+    pos = broker.positions()
+    for p in pos:
+        p["weight"] = p["market_value"] / equity if equity else 0.0
+    hist = pd.Series(dict(broker.portfolio_history(period)), dtype=float)
+    hist.index = pd.to_datetime(hist.index)
+    return {
+        "name": name,
+        "account": acct,
+        "positions": pos,
+        "history": hist.sort_index(),
+        "creds": creds,
+        "cash_weight": acct["cash"] / equity if equity else 0.0,
+    }
+
+
+def journal_summary(path: str | Path | None) -> dict:
+    """Riepilogo del journal in sola lettura: ribilanciamenti, strategia, esito delle operazioni."""
+    if not path or not Path(path).exists():
+        return {}
+    db = sqlite3.connect(f"file:{Path(path).as_posix()}?mode=ro", uri=True)
+    db.row_factory = sqlite3.Row
+    try:
+        cols = {r["name"] for r in db.execute("PRAGMA table_info(events)")}
+        sel = "ts, run_id, payload" + (", portfolio, strategy" if "strategy" in cols else "")
+        runs = db.execute(f"SELECT {sel} FROM events WHERE kind = 'RUN' ORDER BY id").fetchall()
+        status = {
+            r["status"]: r["n"]
+            for r in db.execute("SELECT status, COUNT(*) AS n FROM proposals GROUP BY status")
+        }
+        failed = db.execute("SELECT COUNT(*) FROM events WHERE kind = 'TRADE_FAILED'").fetchone()[0]
+    except sqlite3.DatabaseError:
+        return {}
+    finally:
+        db.close()
+    import json
+
+    out: dict = {"n_runs": len(runs), "operations": status, "trade_failed": failed}
+    if runs:
+        last = runs[-1]
+        p = json.loads(last["payload"])
+        mode = (p.get("params") or {}).get("mode")
+        out |= {
+            "last_run": last["ts"],
+            "portfolio": (last["portfolio"] if "strategy" in cols else None) or p.get("portfolio"),
+            "strategy": (last["strategy"] if "strategy" in cols else None) or mode,
+            "first_equity": (json.loads(runs[0]["payload"]).get("account") or {}).get("equity"),
+        }
+    return out
+
+
+# --- metriche ---------------------------------------------------------------------------------------
+def series_metrics(s: pd.Series) -> dict:
+    """Rendimento, volatilità e perdita massima di una serie di patrimonio giornaliero."""
+    s = s.dropna()
+    if len(s) < 2:
+        return {
+            "n_days": len(s),
+            "total_return": None,
+            "vol": None,
+            "max_drawdown": None,
+            "best_day": None,
+            "worst_day": None,
+        }
+    r = s.pct_change().dropna()
+    return {
+        "n_days": len(s),
+        "total_return": float(s.iloc[-1] / s.iloc[0] - 1),
+        "vol": float(r.std() * math.sqrt(252)) if len(r) > 1 else None,
+        "max_drawdown": float((s / s.cummax() - 1).min()),
+        "best_day": float(r.max()),
+        "worst_day": float(r.min()),
+    }
+
+
+def spy_series(creds: tuple[str, str] | None, start: pd.Timestamp, feed: str) -> pd.Series | None:
+    """Chiusure giornaliere di SPY (None se non raggiungibile o in demo)."""
+    if creds is None:
+        return None
+    try:
+        bars = data.fetch_bars([data.BENCHMARK], feed, creds)
+    except Exception:  # noqa: BLE001 - il confronto con SPY è facoltativo
+        return None
+    s = bars.get(data.BENCHMARK)
+    return None if s is None else s["close"].loc[start:]
+
+
+def compare(a: dict, b: dict, spy: pd.Series | None = None) -> dict:
+    """Confronto completo di due fotografie."""
+    uni = data.load_universe()
+    names, sectors = (
+        dict(zip(uni.ticker, uni.name, strict=True)),
+        dict(zip(uni.ticker, uni.sector_etf, strict=True)),
+    )
+
+    # finestra comune: dal primo giorno in cui entrambi hanno un patrimonio
+    ha, hb = a["history"], b["history"]
+    common = ha.index.intersection(hb.index)
+    win = {}
+    if len(common) >= 2:
+        sa, sb = ha.loc[common], hb.loc[common]
+        win = {
+            "from": str(common[0].date()),
+            "to": str(common[-1].date()),
+            "a": series_metrics(sa),
+            "b": series_metrics(sb),
+        }
+        if spy is not None and len(spy):
+            sp = spy.copy()
+            sp.index = pd.to_datetime(sp.index)
+            sp = sp.reindex(common).ffill().dropna()
+            if len(sp) >= 2:
+                win["spy"] = series_metrics(sp)
+        win["curve"] = pd.DataFrame(
+            {a["name"]: sa / sa.iloc[0] * 100, b["name"]: sb / sb.iloc[0] * 100}
+            | (
+                {"SPY": spy_n}
+                if (spy_n := _norm(win.get("spy") and spy, common)) is not None
+                else {}
+            )
+        )
+    own = {"a": series_metrics(ha), "b": series_metrics(hb)}
+
+    # posizioni
+    wa = {p["symbol"]: p for p in a["positions"]}
+    wb = {p["symbol"]: p for p in b["positions"]}
+    rows = []
+    for sym in sorted(set(wa) | set(wb)):
+        pa, pb = wa.get(sym), wb.get(sym)
+        rows.append(
+            {
+                "symbol": sym,
+                "name": names.get(sym, sym),
+                "sector": sectors.get(sym, "fuori universo"),
+                "in": "entrambi" if pa and pb else a["name"] if pa else b["name"],
+                "w_a": pa["weight"] if pa else 0.0,
+                "w_b": pb["weight"] if pb else 0.0,
+                "value_a": pa["market_value"] if pa else 0.0,
+                "value_b": pb["market_value"] if pb else 0.0,
+                "pl_pct_a": pa["pl_pct"] if pa else None,
+                "pl_pct_b": pb["pl_pct"] if pb else None,
+            }
+        )
+    for r in rows:
+        r["diff"] = r["w_a"] - r["w_b"]
+    rows.sort(key=lambda r: -(r["w_a"] + r["w_b"]))
+    both = [r for r in rows if r["in"] == "entrambi"]
+    union = len(rows)
+    overlap = {
+        "n_a": len(wa),
+        "n_b": len(wb),
+        "n_common": len(both),
+        "jaccard": len(both) / union if union else 0.0,
+        "weight_overlap": float(sum(min(r["w_a"], r["w_b"]) for r in rows)),
+    }
+
+    # settori
+    sec: dict[str, dict] = {}
+    for r in rows:
+        d = sec.setdefault(
+            r["sector"], {"sector": r["sector"], "w_a": 0.0, "w_b": 0.0, "n_a": 0, "n_b": 0}
+        )
+        d["w_a"] += r["w_a"]
+        d["w_b"] += r["w_b"]
+        d["n_a"] += r["w_a"] > 0
+        d["n_b"] += r["w_b"] > 0
+    sector_rows = sorted(sec.values(), key=lambda d: -(d["w_a"] + d["w_b"]))
+    for d in sector_rows:
+        d["diff"] = d["w_a"] - d["w_b"]
+        d["name"] = data.SECTORS.get(d["sector"], d["sector"])
+    return {
+        "a": a,
+        "b": b,
+        "own": own,
+        "window": win,
+        "positions": rows,
+        "overlap": overlap,
+        "sectors": sector_rows,
+    }
+
+
+def _norm(spy: pd.Series | None, common: pd.DatetimeIndex) -> pd.Series | None:
+    if spy is None or not len(spy):
+        return None
+    sp = spy.copy()
+    sp.index = pd.to_datetime(sp.index)
+    sp = sp.reindex(common).ffill().dropna()
+    return None if len(sp) < 2 else sp / sp.iloc[0] * 100
+
+
+# --- stampa ------------------------------------------------------------------------------------------
+def _f(v, kind="pct") -> str:
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return "–"
+    return {"pct": f"{v:+.2%}", "p": f"{v:.1%}", "usd": f"{v:,.0f}$", "n": f"{v:.2f}"}[kind]
+
+
+def report(res: dict, ja: dict | None = None, jb: dict | None = None) -> str:
+    a, b = res["a"], res["b"]
+    ja, jb = ja or {}, jb or {}
+    L = [f"{'':<34}{a['name']:>22}{b['name']:>22}", "-" * 78]
+
+    def row(label, va, vb):
+        L.append(f"{label:<34}{va:>22}{vb:>22}")
+
+    row("Patrimonio", _f(a["account"]["equity"], "usd"), _f(b["account"]["equity"], "usd"))
+    row("Liquidità", _f(a["cash_weight"], "p"), _f(b["cash_weight"], "p"))
+    row("N. titoli", str(len(a["positions"])), str(len(b["positions"])))
+    row(
+        "P/L non realizzato",
+        _f(sum(p["pl"] for p in a["positions"]), "usd"),
+        _f(sum(p["pl"] for p in b["positions"]), "usd"),
+    )
+    if ja or jb:
+        row(
+            "Strategia (journal)",
+            STRATEGY_LABEL.get(ja.get("strategy"), ja.get("strategy") or "–"),
+            STRATEGY_LABEL.get(jb.get("strategy"), jb.get("strategy") or "–"),
+        )
+        row("Ribilanciamenti", str(ja.get("n_runs", "–")), str(jb.get("n_runs", "–")))
+        row(
+            "Operazioni fallite", str(ja.get("trade_failed", "–")), str(jb.get("trade_failed", "–"))
+        )
+    w = res["window"]
+    if w:
+        L += [
+            "",
+            f"Finestra comune: dal {w['from']} al {w['to']} ({w['a']['n_days']} giorni)",
+            "-" * 78,
+        ]
+        for label, key, kind in (
+            ("Rendimento", "total_return", "pct"),
+            ("Volatilità annualizzata", "vol", "p"),
+            ("Perdita massima", "max_drawdown", "pct"),
+            ("Giorno migliore", "best_day", "pct"),
+            ("Giorno peggiore", "worst_day", "pct"),
+        ):
+            row(label, _f(w["a"][key], kind), _f(w["b"][key], kind))
+        if "spy" in w:
+            L.append(
+                f"{'SPY (stessa finestra)':<34}{_f(w['spy']['total_return']):>22}  vol {_f(w['spy']['vol'], 'p')}  perdita max {_f(w['spy']['max_drawdown'])}"
+            )
+            row(
+                "Extra-rendimento vs SPY",
+                _f(_diff(w["a"]["total_return"], w["spy"]["total_return"])),
+                _f(_diff(w["b"]["total_return"], w["spy"]["total_return"])),
+            )
+    else:
+        L += [
+            "",
+            "Storico del patrimonio insufficiente per una finestra comune (servono almeno 2 giorni in comune).",
+        ]
+    o = res["overlap"]
+    L += [
+        "",
+        f"Titoli in comune: {o['n_common']} (su {o['n_a']} e {o['n_b']}); sovrapposizione dei pesi {o['weight_overlap']:.0%}; indice di Jaccard {o['jaccard']:.0%}",
+        "-" * 78,
+    ]
+    L.append(f"{'Settore':<26}{a['name'][:16]:>18}{b['name'][:16]:>18}{'differenza':>14}")
+    for d in res["sectors"][:12]:
+        L.append(f"{d['name'][:25]:<26}{d['w_a']:>18.1%}{d['w_b']:>18.1%}{d['diff']:>+14.1%}")
+    L += ["", "Maggiori differenze di peso per titolo:"]
+    for r in sorted(res["positions"], key=lambda r: -abs(r["diff"]))[:8]:
+        L.append(
+            f"  {r['symbol']:<7}{r['w_a']:>8.1%}{r['w_b']:>8.1%}{r['diff']:>+9.1%}  {r['name'][:30]}"
+        )
+    L += [
+        "",
+        "Nota: il rendimento è del conto (patrimonio), non dei singoli titoli; con pochi giorni di storico le differenze possono essere solo rumore.",
+    ]
+    return "\n".join(L)
+
+
+def _diff(x, y):
+    return None if x is None or y is None else x - y
+
+
+# --- Excel -------------------------------------------------------------------------------------------
+def to_excel(res: dict, ja: dict | None, jb: dict | None, path: str | Path) -> None:
+    a, b = res["a"], res["b"]
+    ja, jb = ja or {}, jb or {}
+    wb = Workbook()
+    wb.remove(wb.active)
+    w = res["window"]
+
+    # Riepilogo
+    ws = wb.create_sheet("Riepilogo")
+    items: list[tuple[str, object, object, str | None]] = [
+        ("Patrimonio ($)", a["account"]["equity"], b["account"]["equity"], MONEY),
+        ("Liquidità ($)", a["account"]["cash"], b["account"]["cash"], MONEY),
+        ("Liquidità (%)", a["cash_weight"], b["cash_weight"], PCT),
+        ("N. titoli", len(a["positions"]), len(b["positions"]), "0"),
+        (
+            "P/L non realizzato ($)",
+            sum(p["pl"] for p in a["positions"]),
+            sum(p["pl"] for p in b["positions"]),
+            MONEY,
+        ),
+        (
+            "Strategia (journal)",
+            STRATEGY_LABEL.get(ja.get("strategy"), ja.get("strategy")),
+            STRATEGY_LABEL.get(jb.get("strategy"), jb.get("strategy")),
+            None,
+        ),
+        ("Ribilanciamenti (journal)", ja.get("n_runs"), jb.get("n_runs"), "0"),
+        ("Operazioni fallite (journal)", ja.get("trade_failed"), jb.get("trade_failed"), "0"),
+    ]
+    if w:
+        for label, key, fmt in (
+            ("Rendimento (finestra comune)", "total_return", PCT2),
+            ("Volatilità annualizzata", "vol", PCT),
+            ("Perdita massima", "max_drawdown", PCT2),
+            ("Giorno migliore", "best_day", PCT2),
+            ("Giorno peggiore", "worst_day", PCT2),
+        ):
+            items.append((label, w["a"][key], w["b"][key], fmt))
+        if "spy" in w:
+            items.append(
+                (
+                    "Rendimento SPY (stessa finestra)",
+                    w["spy"]["total_return"],
+                    w["spy"]["total_return"],
+                    PCT2,
+                )
+            )
+            items.append(
+                (
+                    "Extra-rendimento vs SPY",
+                    _diff(w["a"]["total_return"], w["spy"]["total_return"]),
+                    _diff(w["b"]["total_return"], w["spy"]["total_return"]),
+                    PCT2,
+                )
+            )
+    rows = [{"label": lbl, "a": va, "b": vb, "fmt": fmt} for lbl, va, vb, fmt in items]
+    cols: list[Col] = [
+        ("", "Indicatore", lambda r: r["label"], None),
+        ("", a["name"], lambda r: r["a"], None),
+        ("", b["name"], lambda r: r["b"], None),
+    ]
+    _sheet(ws, cols, rows, freeze="B3")
+    for i, r in enumerate(rows, 3):
+        for c in (2, 3):
+            if r["fmt"]:
+                ws.cell(i, c).number_format = r["fmt"]
+    ws.column_dimensions["A"].width = 36
+    for c in "BC":
+        ws.column_dimensions[c].width = 24
+
+    # Posizioni
+    ws = wb.create_sheet("Posizioni")
+    pcols: list[Col] = [
+        ("", "Titolo", lambda r: r["symbol"], None),
+        ("", "Azienda", lambda r: r["name"], None),
+        ("", "Settore", lambda r: r["sector"], None),
+        ("", "Presente in", lambda r: r["in"], None),
+        (a["name"], "Peso", lambda r: r["w_a"], PCT),
+        (a["name"], "Valore ($)", lambda r: r["value_a"], MONEY),
+        (a["name"], "P/L %", lambda r: r["pl_pct_a"], PCT2),
+        (b["name"], "Peso", lambda r: r["w_b"], PCT),
+        (b["name"], "Valore ($)", lambda r: r["value_b"], MONEY),
+        (b["name"], "P/L %", lambda r: r["pl_pct_b"], PCT2),
+        ("", "Differenza peso (A-B)", lambda r: r["diff"], PCT),
+    ]
+    _sheet(ws, pcols, res["positions"], freeze="C3")
+
+    # Settori
+    ws = wb.create_sheet("Settori")
+    scols: list[Col] = [
+        ("", "Settore", lambda r: r["name"], None),
+        (a["name"], "Peso", lambda r: r["w_a"], PCT),
+        (a["name"], "N. titoli", lambda r: r["n_a"], "0"),
+        (b["name"], "Peso", lambda r: r["w_b"], PCT),
+        (b["name"], "N. titoli", lambda r: r["n_b"], "0"),
+        ("", "Differenza peso (A-B)", lambda r: r["diff"], PCT),
+    ]
+    _sheet(ws, scols, res["sectors"], freeze="B3")
+
+    # Andamento
+    if w and "curve" in w:
+        ws = wb.create_sheet("Andamento (base 100)")
+        cur = w["curve"]
+        ccols: list[Col] = [("", "Data", lambda r: r["date"], None)] + [
+            ("", c, (lambda r, c=c: r[c]), NUM) for c in cur.columns
+        ]
+        _sheet(
+            ws,
+            ccols,
+            [{"date": str(i.date()), **row.to_dict()} for i, row in cur.iterrows()],
+            freeze="B3",
+        )
+
+    o = res["overlap"]
+    _notes_sheet(
+        wb,
+        "Confronto tra due portafogli",
+        [
+            f"Portafoglio A: {a['name']} (conto {a['account'].get('account_number', '?')}); B: {b['name']} (conto {b['account'].get('account_number', '?')})",
+            f"Titoli in comune: {o['n_common']}; sovrapposizione dei pesi {o['weight_overlap']:.1%} (somma dei minimi tra i due pesi); Jaccard {o['jaccard']:.1%}",
+            f"Finestra comune: {w['from']} - {w['to']}"
+            if w
+            else "Finestra comune: non disponibile",
+            "Rendimento, volatilità e perdita massima si calcolano sul patrimonio del conto, giorno per giorno.",
+            "Con pochi giorni di storico le differenze possono essere solo rumore: confrontare almeno 20 sedute.",
+        ],
+    )
+    Path(path).write_bytes(_save(wb))
+
+
+# --- avvio ------------------------------------------------------------------------------------------
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
+    ap.add_argument(
+        "--env-a", help="file di chiavi del portafoglio A (ALPACA_API_KEY / ALPACA_SECRET_KEY)"
+    )
+    ap.add_argument("--env-b", help="file di chiavi del portafoglio B")
+    ap.add_argument("--name-a", default="Portafoglio A")
+    ap.add_argument("--name-b", default="Portafoglio B")
+    ap.add_argument("--journal-a", help="journal del portafoglio A (facoltativo)")
+    ap.add_argument("--journal-b", help="journal del portafoglio B (facoltativo)")
+    ap.add_argument(
+        "--period", default="1M", help="storico del patrimonio: 1W, 1M, 3M, 1A, all (default 1M)"
+    )
+    ap.add_argument("--feed", default="iex")
+    ap.add_argument(
+        "--out", help="file Excel di output (default confronto_portafogli_AAAA-MM-GG.xlsx)"
+    )
+    ap.add_argument("--demo", action="store_true", help="conti simulati, senza chiavi")
+    a = ap.parse_args(argv)
+
+    if a.demo:
+        brokers = _demo_brokers()
+        creds_a = creds_b = None
+    else:
+        if not (a.env_a and a.env_b):
+            ap.error("servono --env-a e --env-b (oppure --demo)")
+        from broker import AlpacaBroker
+
+        creds_a, creds_b = credentials(a.env_a), credentials(a.env_b)
+        brokers = (AlpacaBroker(*creds_a, feed=a.feed), AlpacaBroker(*creds_b, feed=a.feed))
+        if creds_a == creds_b:
+            print(
+                "ATTENZIONE: i due file contengono le stesse chiavi (stesso conto).",
+                file=sys.stderr,
+            )
+    sa = snapshot(brokers[0], a.name_a, a.period, creds_a)
+    sb = snapshot(brokers[1], a.name_b, a.period, creds_b)
+    start = (
+        max(sa["history"].index.min(), sb["history"].index.min())
+        if len(sa["history"]) and len(sb["history"])
+        else pd.Timestamp(datetime.now(UTC).date())
+    )
+    res = compare(sa, sb, spy_series(creds_a, start, a.feed))
+    ja, jb = journal_summary(a.journal_a), journal_summary(a.journal_b)
+    print(report(res, ja, jb))
+    out = a.out or f"confronto_portafogli_{datetime.now(UTC):%Y-%m-%d}.xlsx"
+    to_excel(res, ja, jb, out)
+    print(f"\nExcel scritto in {out}")
+    return 0
+
+
+def _demo_brokers():
+    """Due conti simulati con strategie e storici diversi, per provare lo script senza chiavi."""
+    from broker import DemoBroker
+
+    syms = list(data.load_universe().ticker)
+    bars = data.demo_bars([*syms, data.BENCHMARK])
+    prices = {k: float(v["close"].iloc[-1]) for k, v in bars.items()}
+    days = pd.bdate_range(end=pd.Timestamp(datetime.now(UTC).date()), periods=15)
+    out = []
+    for i, (lo, hi) in enumerate(((0, 25), (12, 40))):
+        br = DemoBroker(1_000_000.0, prices)
+        for s in syms[lo:hi]:
+            br.pos[s] = {
+                "qty": float(int(35_000 / prices[s]) or 1),
+                "avg_entry": prices[s] * (0.99 if i == 0 else 1.01),
+            }
+        br.cash -= sum(p["qty"] * p["avg_entry"] for p in br.pos.values())
+        rng = np.random.default_rng(i + 1)
+        eq = 1_000_000 * np.cumprod(1 + rng.normal(0.0004 * (i + 1), 0.006, len(days)))
+        br.history = [(str(d.date()), float(e)) for d, e in zip(days, eq, strict=True)]
+        out.append(br)
+    return tuple(out)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

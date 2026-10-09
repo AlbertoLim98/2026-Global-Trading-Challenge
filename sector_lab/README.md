@@ -153,6 +153,21 @@ Selezione: `--hour` (ora di avvio di esecuzioni **già registrate**, letta in UT
 `--all`. L'ora serve solo a scegliere righe già scritte: il programma non pianifica né forza mai i
 ribilanciamenti, che partono solo quando premi il pulsante.
 
+### Confronto tra due portafogli (`compare_portfolios.py`)
+
+Script in sola lettura che confronta due portafogli, ognuno con il proprio file di chiavi:
+
+```bash
+uv run python sector_lab/compare_portfolios.py --env-a .env.p17 --env-b .env.p18 --name-a "Portafoglio 17" --name-b "Portafoglio 18" --period 1M
+```
+
+Legge per ciascuno conto, posizioni e storico del patrimonio (Alpaca) e, con `--journal-a/--journal-b`, un
+riepilogo del journal (strategia, ribilanciamenti, operazioni fallite). Stampa e scrive un Excel
+(`confronto_portafogli_AAAA-MM-GG.xlsx`, o `--out`) con rendimento, volatilità e perdita massima sulla
+finestra in comune, confronto con SPY, titoli in comune e sovrapposizione dei pesi, composizione per settore
+e andamento in base 100. `--demo` prova lo script con due conti simulati. Con pochi giorni di storico le
+differenze possono essere solo rumore.
+
 **Titoli non negoziabili:** a ogni ribilanciamento il programma chiede ad Alpaca l'elenco delle azioni
 attive e negoziabili ed esclude dall'elenco quelle che non lo sono (fusi, ritirati, sospesi: es. un
 errore "asset WBD is not active"). Vale anche per la scheda Aziende. Dopo un errore di questo tipo

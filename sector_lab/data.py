@@ -52,14 +52,16 @@ def keys() -> tuple[str, str] | None:
     return (k, s) if k and s else None
 
 
-def fetch_bars(symbols: list[str], feed: str = "iex") -> dict[str, pd.DataFrame]:
+def fetch_bars(
+    symbols: list[str], feed: str = "iex", creds: tuple[str, str] | None = None
+) -> dict[str, pd.DataFrame]:
     """Barre giornaliere rettificate (split e dividendi) per i simboli richiesti."""
     from alpaca.data.enums import Adjustment, DataFeed
     from alpaca.data.historical import StockHistoricalDataClient
     from alpaca.data.requests import StockBarsRequest
     from alpaca.data.timeframe import TimeFrame
 
-    creds = keys()
+    creds = creds or keys()
     if creds is None:
         raise RuntimeError("ALPACA_API_KEY / ALPACA_SECRET_KEY mancanti (.env)")
     client = StockHistoricalDataClient(*creds)
