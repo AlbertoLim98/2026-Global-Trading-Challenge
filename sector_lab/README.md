@@ -56,8 +56,9 @@ Il pulsante **Avvia ribilanciamento giornaliero** rigenera le tabelle (settori e
 modalità qualità o alto beta), calcola l'allocazione obiettivo su un capitale di 1.000.000$ e
 **invia da solo gli ordini** al conto **paper**: prima le vendite (si attende l'esito, fino a
 15 s), poi gli acquisti, tutti a mercato. Non c'è approvazione per singola operazione: il pulsante
-è l'unico passaggio umano. Se ci sono ordini ancora in corso il nuovo ribilanciamento non parte,
-per non duplicarli.
+è l'unico passaggio umano. Se ci sono ordini ancora in corso (per esempio in coda a mercato chiuso) il nuovo ribilanciamento non parte,
+per non duplicarli: il pulsante **Annulla ordini in corso** li annulla sul conto e sblocca il ribilanciamento.
+Gli ordini che il conto non conosce più (conto azzerato, ricreato o cambiato) vengono sbloccati da soli.
 
 **Operazioni non andate a buon fine** (ordine rifiutato, annullato, scaduto, eseguito solo in parte,
 potere d'acquisto insufficiente, errore del broker): compaiono in un avviso rosso in cima alla

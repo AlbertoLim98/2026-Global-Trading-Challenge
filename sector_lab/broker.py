@@ -28,6 +28,7 @@ class Broker(Protocol):
         self, symbol: str, side: str, qty: float, limit_price: float, client_id: str
     ) -> dict: ...
     def get_order(self, order_id: str) -> dict: ...
+    def cancel_order(self, order_id: str) -> str: ...
 
 
 def _num(v: Any) -> float | None:
@@ -165,6 +166,27 @@ class AlpacaBroker:
     def get_order(self, order_id: str) -> dict:
         return _order(with_retry(lambda: self._t.get_order_by_id(order_id)))
 
+    def cancel_order(self, order_id: str) -> str:
+        """Annulla un ordine aperto. Esito: canceled | not_found (conto diverso o azzerato) | not_cancelable."""
+        from alpaca.common.exceptions import APIError
+
+        try:
+            with_retry(lambda: self._t.cancel_order_by_id(order_id))
+            return "canceled"
+        except APIError as e:
+            code = getattr(e, "status_code", None)
+            if code == 404:
+                return "not_found"
+            if code == 422:
+                return "not_cancelable"  # già eseguito, annullato o scaduto
+            raise
+
+
+class OrderNotFound(Exception):
+    """Ordine sconosciuto al conto (come l'errore 404 di Alpaca)."""
+
+    status_code = 404
+
 
 class DemoBroker:
     """Conto simulato in memoria: esegue subito al prezzo indicato. Solo per provare l'interfaccia."""
@@ -174,6 +196,8 @@ class DemoBroker:
     def __init__(self, cash: float, prices: dict[str, float]) -> None:
         self.cash = cash
         self.prices = prices
+        self.number = "DEMO"  # numero del conto simulato
+        self.open = True  # mercato aperto?
         self.pos: dict[str, dict] = {}
         self.orders: dict[str, dict] = {}
         self._lock = threading.Lock()
@@ -181,7 +205,7 @@ class DemoBroker:
     def account(self) -> dict:
         mv = sum(p["qty"] * self.prices.get(s, p["avg_entry"]) for s, p in self.pos.items())
         return {
-            "account_number": "DEMO",
+            "account_number": self.number,
             "equity": self.cash + mv,
             "cash": self.cash,
             "buying_power": self.cash,
@@ -208,7 +232,7 @@ class DemoBroker:
         return out
 
     def clock(self) -> dict:
-        return {"is_open": True, "next_open": "", "next_close": ""}
+        return {"is_open": self.open, "next_open": "", "next_close": ""}
 
     def tradable_symbols(self) -> set[str] | None:
         return None  # demo: tutto è negoziabile
@@ -262,4 +286,16 @@ class DemoBroker:
         return self.submit_market(symbol, side, qty, client_id)
 
     def get_order(self, order_id: str) -> dict:
-        return next(o for o in self.orders.values() if o["order_id"] == order_id)
+        for o in self.orders.values():
+            if o["order_id"] == order_id:
+                return o
+        raise OrderNotFound(f"order not found: {order_id}")
+
+    def cancel_order(self, order_id: str) -> str:
+        for o in self.orders.values():
+            if o["order_id"] == order_id:
+                if o["order_status"] in ("new", "accepted", "pending_new"):
+                    o["order_status"] = "canceled"
+                    return "canceled"
+                return "not_cancelable"
+        return "not_found"

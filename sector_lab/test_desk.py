@@ -389,16 +389,7 @@ def test_scarce_cash_scales_buys_down_instead_of_failing(env):
 
 def test_open_orders_block_a_new_run_until_resolved(env, monkeypatch):
     desk, broker, _ = env
-
-    def queued(symbol, side, qty, client_id):
-        return {
-            "order_id": f"q-{client_id}",
-            "order_status": "accepted",
-            "filled_qty": 0.0,
-            "filled_avg_price": None,
-        }
-
-    monkeypatch.setattr(broker, "submit_market", queued)
+    _queue_orders(broker, monkeypatch)  # ordini accettati dal broker ma non ancora eseguiti
     assert desk.run("quality", 1_000_000)["outcome"]["in_progress"] > 0
     with pytest.raises(desk_mod.DeskError, match="ordini ancora in corso"):
         desk.run("quality", 1_000_000)
@@ -804,3 +795,80 @@ def test_hour_is_read_in_utc_by_default_and_tz_can_be_changed(tmp_path, capsys):
             "--dry-run",
         ]
     ) in (0, 1)
+
+
+# --- ordini rimasti in coda / conto ricreato ----------------------------------------------------------
+def _queue_orders(broker, monkeypatch):
+    """Il mercato è chiuso: gli ordini restano accettati ma non eseguiti."""
+
+    def queued(symbol, side, qty, client_id):
+        o = {
+            "order_id": f"q-{client_id}",
+            "order_status": "accepted",
+            "filled_qty": 0.0,
+            "filled_avg_price": None,
+        }
+        broker.orders[client_id] = o
+        return o
+
+    monkeypatch.setattr(broker, "submit_market", queued)
+    broker.open = False
+
+
+def test_orders_of_a_deleted_account_no_longer_block_the_run(env, monkeypatch):
+    desk, broker, prices = env
+    _queue_orders(broker, monkeypatch)
+    first = desk.run("quality", 1_000_000)
+    assert first["outcome"]["in_progress"] > 0
+    assert any("Mercato chiuso" in n for n in first["notes"])
+    with pytest.raises(desk_mod.DeskError, match="Annulla ordini in corso"):
+        desk.run("quality", 1_000_000)
+    # il conto viene eliminato e ricreato: i vecchi ordini non esistono più (404)
+    desk.broker = broker_mod.DemoBroker(1_000_000.0, prices)
+    res = desk.run("quality", 1_000_000)
+    assert res["outcome"]["filled"] == res["outcome"]["total"] > 0
+    old = [e for e in desk.journal.events(100_000) if e["kind"] == "TRADE_FAILED"]
+    assert old and all("ordine non trovato" in e["payload"]["reason"] for e in old)
+    assert "submitted" not in [t["status"] for t in desk.trades()]
+
+
+def test_orders_of_another_account_are_voided_by_account_number(env, monkeypatch):
+    desk, broker, prices = env
+    _queue_orders(broker, monkeypatch)
+    desk.run("quality", 1_000_000)
+    new = broker_mod.DemoBroker(1_000_000.0, prices)
+    new.number = "ALTRO-CONTO"
+    desk.broker = new
+    assert desk._void_foreign_orders() > 0
+    voided = [
+        e
+        for e in desk.journal.events(100_000)
+        if e["kind"] == "DECISION_DONE" and "note" in e["payload"]
+    ]
+    assert voided and "ALTRO-CONTO" in voided[0]["payload"]["note"]
+    assert desk.run("quality", 1_000_000)["outcome"]["filled"] > 0
+
+
+def test_cancel_open_orders_unblocks_the_rebalance(env, monkeypatch):
+    desk, broker, _ = env
+    _queue_orders(broker, monkeypatch)
+    desk.run("quality", 1_000_000)
+    n = len(desk.trades())
+    res = desk.cancel_open()
+    assert res == {"canceled": n, "not_found": 0, "already_done": 0}
+    assert {t["status"] for t in desk.trades()} == {"canceled"}
+    assert all(o["order_status"] == "canceled" for o in broker.orders.values())
+    assert any(e["kind"] == "ORDER_CANCELED" for e in desk.journal.events(100_000))
+    monkeypatch.undo()
+    broker.open = True
+    assert desk.run("quality", 1_000_000)["outcome"]["filled"] > 0
+
+
+def test_cancel_open_on_a_recreated_account_marks_orders_as_void(env, monkeypatch):
+    desk, broker, prices = env
+    _queue_orders(broker, monkeypatch)
+    desk.run("quality", 1_000_000)
+    desk.broker = broker_mod.DemoBroker(1_000_000.0, prices)
+    res = desk.cancel_open()
+    assert res["canceled"] == 0 and res["not_found"] == 0  # già sbloccati dall'aggiornamento (404)
+    assert "submitted" not in [t["status"] for t in desk.trades()]

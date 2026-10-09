@@ -103,6 +103,7 @@ svg{width:100%;height:auto;display:block}
       <label>Modalità <select id="r-mode"><option value="quality">Qualità (prudente)</option><option value="beta">Alto beta</option><option value="short">Breve termine (1 gg)</option></select></label>
       <label>Capitale $ <input id="r-cap" type="number" value="1000000" step="10000" min="10000" style="width:120px"></label>
       <button class="btn primary" id="r-run">Avvia ribilanciamento giornaliero (invia gli ordini)</button>
+      <button class="btn" id="r-cancel">Annulla ordini in corso</button>
       <span class="badge" id="r-market"></span>
     </div>
     <div class="card" id="r-summary" hidden></div>
@@ -269,7 +270,7 @@ async function post(u,b){const r=await fetch(u,{method:'POST',headers:POSTH,body
 const hhmm=iso=>new Date(iso).toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'});
 function msg(t,ok){$('#msg').innerHTML=`<div class="${ok?'warn':'err'}">${t}</div>`}
 let rTimer=null;
-const ESITO={filled:['Eseguita','ok'],submitted:['In corso / in coda','wait'],failed:['NON ANDATA A BUON FINE','bad'],repositioned:['Riposizionata','mute'],void:['Annullata (posizione assente)','mute'],superseded:['Archiviata','mute']};
+const ESITO={canceled:['Annullata','mute'],filled:['Eseguita','ok'],submitted:['In corso / in coda','wait'],failed:['NON ANDATA A BUON FINE','bad'],repositioned:['Riposizionata','mute'],void:['Annullata (posizione assente)','mute'],superseded:['Archiviata','mute']};
 function renderTrades(d){
   $('#r-market').textContent=(d.broker==='demo'?'DEMO · ':'Alpaca paper · ')+(d.market.is_open?'mercato aperto':'mercato chiuso (gli ordini restano in coda fino all\'apertura)');
   document.title=(d.n_failed?`(${d.n_failed} fallite) `:'')+BASE_TITLE;
@@ -312,7 +313,7 @@ async function runRebalance(){
   btn.disabled=false;btn.textContent='Avvia ribilanciamento giornaliero (invia gli ordini)';
   loadTrades();
 }
-const KIND_LABEL={RUN:'Ribilanciamento',RELABEL:'Riclassificazione',PROPOSAL:'Proposta',DECISION:'Invio',DECISION_DONE:'Esito',TRADE_FAILED:'FALLITA',REPOSITION:'Riposizionata',ORDER:'Ordine',ORDER_UPDATE:'Ordine aggiornato',STOP_CHECK:'Controllo stop',SUPERSEDED:'Sostituita',ERROR:'Errore'};
+const KIND_LABEL={RUN:'Ribilanciamento',RELABEL:'Riclassificazione',PROPOSAL:'Proposta',DECISION:'Invio',DECISION_DONE:'Esito',TRADE_FAILED:'FALLITA',REPOSITION:'Riposizionata',ORDER:'Ordine',ORDER_UPDATE:'Ordine aggiornato',ORDER_CANCELED:'Ordine annullato',STOP_CHECK:'Controllo stop',SUPERSEDED:'Sostituita',ERROR:'Errore'};
 async function loadJournal(){
   try{
     const d=await api('/api/journal?limit=300'+($('#j-kind').value?'&kind='+$('#j-kind').value:''));
@@ -331,6 +332,13 @@ async function loadInfo(){
     if(i.locked){$('#r-mode').value=i.strategy;$('#r-mode').disabled=true;$('#r-mode').title='Strategia fissa di questo portafoglio'}
   }catch(e){/* info non essenziale */}
 }
+async function cancelOpen(){
+  const b=$('#r-cancel');b.disabled=true;
+  try{const r=await post('/api/orders/cancel');
+    msg(`Ordini in corso: ${r.canceled} annullati, ${r.not_found} non trovati sul conto (sbloccati), ${r.already_done} già conclusi.`,true)}catch(e){err(e)}
+  b.disabled=false;loadTrades();
+}
+$('#r-cancel').onclick=cancelOpen;
 $('#r-run').onclick=runRebalance;$('#j-refresh').onclick=loadJournal;$('#j-kind').onchange=loadJournal;
 
 const PIL=['rsi','move','volume','candle','relstrength','context','volatility'];

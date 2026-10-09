@@ -354,6 +354,8 @@ def summarize(kind: str, p: dict) -> str:
             f"Riclassificate {n} esecuzioni: {p.get('portfolio')} / "
             f"{STRATEGY_LABEL.get(p.get('strategy'), p.get('strategy'))}"
         )
+    if kind == "ORDER_CANCELED":
+        return f"Ordine annullato {p.get('symbol', '')} ({p.get('order_id')}){': ' + p['note'] if p.get('note') else ''}"
     if kind == "SUPERSEDED":
         return f"Operazione fallita archiviata dalla nuova esecuzione {p.get('by_run')}"
     if kind == "ERROR":

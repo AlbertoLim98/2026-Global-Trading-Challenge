@@ -8,6 +8,7 @@ solo in parte, errore del broker) viene segnalata e si può riposizionare a prez
 
 from __future__ import annotations
 
+import contextlib
 import math
 import re
 import time
@@ -87,7 +88,7 @@ class Desk:
             names = ", ".join(sorted({b["symbol"] for b in busy})[:8])
             raise DeskError(
                 f"Ci sono {len(busy)} ordini ancora in corso ({names}): attendi il loro esito "
-                "prima di rilanciare, per non duplicare gli ordini"
+                "prima di rilanciare, per non duplicare gli ordini, oppure usa «Annulla ordini in corso»"
             )
         p = portfolio.Params(capital=capital, mode=mode)
         run_id = now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
@@ -121,6 +122,13 @@ class Desk:
                 res["notes"].append(
                     f"{len(gone)} titoli dell'elenco non sono negoziabili su Alpaca (non attivi, fusi o "
                     f"ritirati) e sono stati esclusi: {shown}"
+                )
+        with contextlib.suppress(Exception):  # l'avviso è solo informativo
+            if not self.broker.clock()["is_open"]:
+                res["notes"].append(
+                    "Mercato chiuso: gli ordini restano in coda e si eseguono all'apertura (9:30 a New York, "
+                    "le 15:30 in Italia). Finché sono in coda un nuovo ribilanciamento non parte: "
+                    "usa «Annulla ordini in corso» per annullarli"
                 )
         if acct["equity"] < capital * 0.99:
             res["notes"].append(
@@ -299,9 +307,28 @@ class Desk:
         )  # fmt: skip
         return "failed"
 
+    def _void_foreign_orders(self) -> int:
+        """Ordini di un altro conto Alpaca (conto cambiato o ricreato): non si possono più seguire."""
+        try:
+            mine = self.broker.account().get("account_number")
+        except Exception:  # noqa: BLE001 - senza il numero del conto si usa solo l'errore "ordine non trovato"
+            return 0
+        n = 0
+        for pr in self.journal.proposals(("submitted",)):
+            other = pr.get("account_number")
+            if other and mine and other != mine:
+                self.journal.set_status(
+                    pr["id"],
+                    "void",
+                    "DECISION_DONE",
+                    {"note": f"ordine del conto {other}, ora si usa il conto {mine}"},
+                )
+                n += 1
+        return n
+
     def refresh_orders(self) -> int:
         """Aggiorna le operazioni con ordine inviato ma non concluso; segnala quelle fallite."""
-        n = 0
+        n = self._void_foreign_orders()
         for pr in self.journal.proposals(("submitted",)):
             oid = pr.get("order_id")
             if not oid:
@@ -309,6 +336,14 @@ class Desk:
             try:
                 o = self.broker.get_order(oid)
             except Exception as e:  # noqa: BLE001
+                if getattr(e, "status_code", None) == 404:
+                    # il conto non conosce quell'ordine (conto azzerato o ricreato): non blocca più nulla
+                    self._fail(
+                        pr["id"],
+                        "ordine non trovato su Alpaca (conto azzerato, ricreato o cambiato)",
+                    )
+                    n += 1
+                    continue
                 msg = f"{type(e).__name__}: {e}"
                 self.journal.log("ERROR", {"message": msg, "order_id": oid}, pr["run_id"], pr["id"])
                 continue
@@ -322,6 +357,40 @@ class Desk:
                 self._apply_order(pr["id"], o, pr.get("exec_qty") or pr["qty"])
                 n += 1
         return n
+
+    def cancel_open(self) -> dict:
+        """Annulla gli ordini ancora in corso (anche quelli in coda a mercato chiuso) e sblocca il ribilanciamento."""
+        self.refresh_orders()
+        res = {"canceled": 0, "not_found": 0, "already_done": 0}
+        for pr in self.journal.proposals(("submitted",)):
+            oid = pr.get("order_id")
+            if not oid:
+                continue
+            out = self.broker.cancel_order(oid)
+            if out == "canceled":
+                self.journal.set_status(
+                    pr["id"],
+                    "canceled",
+                    "ORDER_CANCELED",
+                    {"symbol": pr["symbol"], "order_id": oid},
+                )
+                res["canceled"] += 1
+            elif out == "not_found":
+                self.journal.set_status(
+                    pr["id"],
+                    "void",
+                    "ORDER_CANCELED",
+                    {
+                        "symbol": pr["symbol"],
+                        "order_id": oid,
+                        "note": "ordine non trovato sul conto",
+                    },
+                )
+                res["not_found"] += 1
+            else:
+                res["already_done"] += 1
+        self.refresh_orders()  # chi era già eseguito o scaduto prende il suo esito vero
+        return res
 
     # --- riposizionamento a prezzo attuale ---------------------------------------------------------
     def reposition(self, pid: str) -> dict:
